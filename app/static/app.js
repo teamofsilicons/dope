@@ -3,7 +3,7 @@ const state = {
   route: "active",
   dopes: [],
   allDopes: [],
-  filters: { min: "", max: "", completedBy: "", from: "", to: "" },
+  filters: { min: "", max: "", depsDoped: false, completedBy: "", from: "", to: "" },
   authMode: "login",
 };
 
@@ -151,6 +151,7 @@ function filteredDopes() {
   const max = minutesFromText(state.filters.max);
   if (min) items = items.filter((d) => d.time_minutes >= min);
   if (max) items = items.filter((d) => d.time_minutes <= max);
+  if (state.filters.depsDoped) items = items.filter((d) => (d.blocked_dependencies || []).length === 0);
   if (state.route === "completed") {
     const by = state.filters.completedBy.trim().toLowerCase();
     if (by) items = items.filter((d) => (d.completed_by?.display_name || "").toLowerCase().includes(by));
@@ -519,6 +520,7 @@ $("search").oninput = render;
 $("filter-open").onclick = () => {
   $("filter-min").value = state.filters.min;
   $("filter-max").value = state.filters.max;
+  $("filter-deps-doped").checked = state.filters.depsDoped;
   $("filter-completed-by").value = state.filters.completedBy;
   $("filter-from").value = state.filters.from;
   $("filter-to").value = state.filters.to;
@@ -526,13 +528,20 @@ $("filter-open").onclick = () => {
 };
 $("filter-apply").onclick = (event) => {
   event.preventDefault();
-  state.filters = { min: $("filter-min").value, max: $("filter-max").value, completedBy: $("filter-completed-by").value, from: $("filter-from").value, to: $("filter-to").value };
+  state.filters = {
+    min: $("filter-min").value,
+    max: $("filter-max").value,
+    depsDoped: $("filter-deps-doped").checked,
+    completedBy: $("filter-completed-by").value,
+    from: $("filter-from").value,
+    to: $("filter-to").value,
+  };
   $("filter-dialog").close();
   render();
 };
 $("filter-reset").onclick = (event) => {
   event.preventDefault();
-  state.filters = { min: "", max: "", completedBy: "", from: "", to: "" };
+  state.filters = { min: "", max: "", depsDoped: false, completedBy: "", from: "", to: "" };
   $("filter-dialog").close();
   render();
 };
