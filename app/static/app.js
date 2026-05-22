@@ -198,9 +198,9 @@ function openNewDope() {
   $("modal-body").innerHTML = `
     <div class="modal-topbar is-visible"><strong>New Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
     <div class="modal-content">
-      <label>Title<input id="new-title" placeholder="Improve onboarding empty state"></label>
+      <label>Title<input id="new-title" name="dope_new_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" placeholder="Improve onboarding empty state"></label>
       <label>Description<div id="new-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here."></div></label>
-      <label>Time to complete<input id="new-time" placeholder="2hr, 30min, 0.5hr"></label>
+      <label>Time to complete<input id="new-time" name="dope_new_time" autocomplete="off" placeholder="2hr, 30min, 0.5hr"></label>
     </div>
     <div class="modal-action-bar"><button id="create-dope" class="primary-wide" value="default">Create Dope</button></div>
   `;
@@ -342,7 +342,7 @@ function openEditDope(d) {
   $("modal-body").innerHTML = `
     <div class="modal-topbar is-visible"><strong>Edit Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
     <div class="modal-content">
-      <label>Title<input id="edit-title" value="${escapeHtml(d.title)}"></label>
+      <label>Title<input id="edit-title" name="dope_edit_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" value="${escapeHtml(d.title)}"></label>
       <label>Description<div id="edit-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(d.description_html)}</div></label>
     </div>
     <div class="modal-action-bar">
