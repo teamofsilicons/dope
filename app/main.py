@@ -495,14 +495,57 @@ def list_dopes(status: str = "active", user_cookie: str | None = Cookie(default=
         raise HTTPException(status_code=400, detail="Bad status")
     if status == "active":
         order = """
-        (
-          SELECT COUNT(*)
-          FROM dope_dependencies dd
-          JOIN dopes child ON child.id = dd.dope_id
-          WHERE dd.depends_on_id = dopes.id
-            AND child.archived_at IS NULL
-            AND child.completed_at IS NULL
-        ) DESC, id DESC
+        CASE
+          WHEN (
+            SELECT COUNT(*)
+            FROM dope_dependencies dd
+            JOIN dopes child ON child.id = dd.dope_id
+            WHERE dd.depends_on_id = dopes.id
+              AND child.archived_at IS NULL
+              AND child.completed_at IS NULL
+          ) > 0 THEN 0
+          WHEN (
+            SELECT COUNT(*)
+            FROM dope_dependencies dd
+            JOIN dopes parent ON parent.id = dd.depends_on_id
+            WHERE dd.dope_id = dopes.id
+              AND parent.archived_at IS NULL
+          ) = 0 THEN 1
+          ELSE 2
+        END,
+        CASE
+          WHEN (
+            SELECT COUNT(*)
+            FROM dope_dependencies dd
+            JOIN dopes child ON child.id = dd.dope_id
+            WHERE dd.depends_on_id = dopes.id
+              AND child.archived_at IS NULL
+              AND child.completed_at IS NULL
+          ) > 0 THEN -(
+            SELECT COUNT(*)
+            FROM dope_dependencies dd
+            JOIN dopes child ON child.id = dd.dope_id
+            WHERE dd.depends_on_id = dopes.id
+              AND child.archived_at IS NULL
+              AND child.completed_at IS NULL
+          )
+          WHEN (
+            SELECT COUNT(*)
+            FROM dope_dependencies dd
+            JOIN dopes parent ON parent.id = dd.depends_on_id
+            WHERE dd.dope_id = dopes.id
+              AND parent.archived_at IS NULL
+          ) > 0 THEN (
+            SELECT COUNT(*)
+            FROM dope_dependencies dd
+            JOIN dopes parent ON parent.id = dd.depends_on_id
+            WHERE dd.dope_id = dopes.id
+              AND parent.archived_at IS NULL
+          )
+          ELSE 0
+        END,
+        title COLLATE NOCASE ASC,
+        id DESC
         """
     else:
         order = "completed_at DESC, id DESC" if status == "completed" else "id DESC"
