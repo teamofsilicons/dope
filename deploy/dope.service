@@ -1,0 +1,15 @@
+[Unit]
+Description=Dope FastAPI app
+After=network.target
+
+[Service]
+User=ubuntu
+Group=www-data
+WorkingDirectory=/srv/dope
+EnvironmentFile=/etc/dope.env
+ExecStart=/srv/dope/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

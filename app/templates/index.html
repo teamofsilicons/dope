@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ede8e0">
+  <title>Dopes</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2/src/regular/style.css">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div id="toast" class="toast" hidden></div>
+
+  <main id="auth-view" class="auth-shell" hidden>
+    <section class="auth-panel">
+      <p class="kicker">Team of Silicons</p>
+      <h1>Dopes</h1>
+      <p class="muted">Track product amendments, self-assign work, and close it with commits.</p>
+      <form id="auth-form" class="stack">
+        <input id="auth-username" autocomplete="username" placeholder="Username" required>
+        <input id="auth-password" type="password" autocomplete="current-password" placeholder="Password" required>
+        <input id="auth-display" autocomplete="name" placeholder="Display name" hidden>
+        <button id="auth-submit" type="submit">Sign in</button>
+      </form>
+      <button id="auth-toggle" class="link-button" type="button">Create an account</button>
+    </section>
+  </main>
+
+  <main id="app-view" hidden>
+    <header class="site-head">
+      <a href="#active" class="site-logo"><span class="mark">D</span><span>Dopes</span></a>
+      <nav class="nav-links">
+        <a href="#active" data-route="active">Active</a>
+        <a href="#completed" data-route="completed">Completed</a>
+        <a href="#archived" data-route="archived">Archived</a>
+      </nav>
+      <div class="user-chip"><span id="user-name"></span><button id="logout" title="Sign out"><i class="ph ph-sign-out"></i></button></div>
+    </header>
+
+    <section class="page-shell">
+      <div class="title-row">
+        <div>
+          <h1 id="page-title">Dopes</h1>
+          <p id="page-subtitle" class="muted">Product work waiting to be amended.</p>
+        </div>
+        <button id="new-dope"><i class="ph ph-plus"></i>New Dope</button>
+      </div>
+
+      <section class="toolbar">
+        <label class="search-box"><i class="ph ph-magnifying-glass"></i><input id="search" placeholder="Search"></label>
+        <button id="filter-open" class="secondary"><i class="ph ph-sliders-horizontal"></i>Filter</button>
+      </section>
+
+      <section id="active-assigned-wrap">
+        <h2>Currently Active Dopes</h2>
+        <div id="active-assigned" class="dope-list compact"></div>
+      </section>
+
+      <section class="list-section">
+        <h2 id="list-heading">All Dopes</h2>
+        <div id="dope-list" class="dope-list"></div>
+        <p id="empty" class="empty" hidden>No dopes found.</p>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="dope-dialog">
+    <form method="dialog" class="modal">
+      <button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button>
+      <h2 id="modal-title">New Dope</h2>
+      <div id="modal-body"></div>
+    </form>
+  </dialog>
+
+  <dialog id="filter-dialog">
+    <form method="dialog" class="modal small">
+      <button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button>
+      <h2>Filters</h2>
+      <div class="grid-two">
+        <label>Min time<input id="filter-min" placeholder="30min"></label>
+        <label>Max time<input id="filter-max" placeholder="5hr"></label>
+      </div>
+      <div id="completed-filters">
+        <label>Completed by<input id="filter-completed-by" placeholder="Name"></label>
+        <div class="grid-two">
+          <label>From<input id="filter-from" type="date"></label>
+          <label>To<input id="filter-to" type="date"></label>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="filter-apply" value="default">Apply filters</button>
+        <button id="filter-reset" class="secondary" value="default">Reset filters</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
