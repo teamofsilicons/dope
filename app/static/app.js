@@ -161,7 +161,22 @@ function filteredDopes() {
   return items;
 }
 
+function filtersActive() {
+  const baseActive = Boolean(state.filters.min || state.filters.max || state.filters.depsDoped);
+  if (state.route !== "completed") return baseActive;
+  return baseActive || Boolean(state.filters.completedBy || state.filters.from || state.filters.to);
+}
+
+function renderFilterButton() {
+  const active = filtersActive();
+  const button = $("filter-open");
+  button.classList.toggle("secondary", !active);
+  button.classList.toggle("filters-active", active);
+  button.innerHTML = `<i class="ph ph-sliders-horizontal"></i>${active ? "Filters Applied" : "Filter"}`;
+}
+
 function render() {
+  renderFilterButton();
   const items = filteredDopes();
   const assigned = items.filter((d) => d.status === "active" && d.assigned_to);
   $("active-assigned").innerHTML = assigned.length ? assigned.map(card).join("") : `<p class="empty">No one is working on a dope right now.</p>`;

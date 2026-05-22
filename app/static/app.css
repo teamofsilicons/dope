@@ -62,6 +62,7 @@ h1 { margin: 0; font-size: clamp(44px, 11vw, 82px); letter-spacing: -0.055em; li
 h2 { margin: 34px 0 14px; font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; font-family: var(--font-mono); color: var(--fg-dim); }
 .title-row p { margin: 10px 0 0; }
 .toolbar { display: grid; grid-template-columns: 1fr auto; gap: 12px; margin: 24px 0 10px; }
+.toolbar button.filters-active { background: var(--fg); color: var(--bg); border-color: var(--fg); }
 .search-box { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); background: var(--bg-3); padding: 0 12px; }
 .search-box:focus-within { border-color: var(--fg); }
 .search-box input { border: 0; background: transparent; padding: 0; box-shadow: none; outline: 0; }
