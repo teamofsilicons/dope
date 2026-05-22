@@ -316,11 +316,24 @@ async function openDope(id) {
   const history = d.assignment_history.length ? `<h2>Assignment History</h2><ul class="history">${d.assignment_history.map((h) => `<li>${escapeHtml(h.display_name)} tried this on ${fullDate(h.assigned_at)}${h.unassigned_at ? ` and unassigned on ${fullDate(h.unassigned_at)}` : ""}</li>`).join("")}</ul>` : "";
   const links = d.commit_links.length ? `<h2>Commits</h2><ul class="links">${d.commit_links.map((l) => `<li><a href="${escapeHtml(l)}" target="_blank" rel="noreferrer">${escapeHtml(l)}</a></li>`).join("")}</ul>` : "";
   const blocked = (d.blocked_dependencies || []).length > 0;
-  const dependencies = d.dependencies?.length ? `
+  const sortedDependencies = [...(d.dependencies || [])].sort((a, b) => {
+    const aUndoped = a.status !== "completed";
+    const bUndoped = b.status !== "completed";
+    if (aUndoped !== bUndoped) return aUndoped ? -1 : 1;
+    return a.title.localeCompare(b.title);
+  });
+  const dependencyCount = sortedDependencies.length;
+  const undopedCount = sortedDependencies.filter((dep) => dep.status !== "completed").length;
+  const dependencyLabel = `${dependencyCount} ${dependencyCount === 1 ? "dependency" : "dependencies"} &bull; ${undopedCount} undoped`;
+  const dependencies = dependencyCount ? `
     <section class="dependency-links-wrap">
       <h2>Dependencies</h2>
-      <div class="dependency-links">
-        ${d.dependencies.map((dep) => `<button class="dependency-link" data-dependency-open="${dep.id}" value="default">
+      <button id="dependency-summary" class="dependency-summary" value="default">
+        <span>${dependencyLabel}</span>
+        <i class="ph ph-caret-down"></i>
+      </button>
+      <div id="dependency-links" class="dependency-links" hidden>
+        ${sortedDependencies.map((dep) => `<button class="dependency-link ${dep.status !== "completed" ? "is-undoped" : ""}" data-dependency-open="${dep.id}" value="default">
           <span>${escapeHtml(dep.title)}</span>
           <small>${dep.status === "completed" ? "Doped" : "Undoped"}</small>
         </button>`).join("")}
@@ -364,6 +377,15 @@ async function openDope(id) {
       openDope(Number(el.dataset.dependencyOpen));
     };
   });
+  const dependencySummary = $("dependency-summary");
+  const dependencyLinks = $("dependency-links");
+  if (dependencySummary && dependencyLinks) {
+    dependencySummary.onclick = (event) => {
+      event.preventDefault();
+      dependencyLinks.hidden = !dependencyLinks.hidden;
+      dependencySummary.classList.toggle("is-open", !dependencyLinks.hidden);
+    };
+  }
   bindDopeActions(d);
   bindVersionControls(d);
   $("dope-dialog").showModal();

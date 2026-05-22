@@ -118,9 +118,14 @@ dialog::backdrop { background: rgba(26,26,26,0.42); backdrop-filter: blur(4px); 
 .dependency-option span { display: grid; gap: 3px; min-width: 0; }
 .dependency-option strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dependency-option small { color: var(--fg-muted); font-family: var(--font-mono); font-size: 11px; }
-.dependency-links-wrap h2 { margin-top: 18px; }
-.dependency-links { display: grid; gap: 8px; margin: 0 0 18px; }
+.dependency-links-wrap { margin: 18px 0; }
+.dependency-links-wrap h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.12em; color: var(--fg-dim); font-family: var(--font-mono); text-transform: uppercase; }
+.dependency-summary { width: 100%; min-height: 44px; display: flex; justify-content: space-between; background: var(--bg-3); color: var(--fg); border-color: var(--border); }
+.dependency-summary i { transition: transform var(--transition); }
+.dependency-summary.is-open i { transform: rotate(180deg); }
+.dependency-links { display: grid; gap: 8px; margin: 8px 0 0; }
 .dependency-link { width: 100%; min-height: 46px; display: grid; grid-template-columns: 1fr auto; text-align: left; background: var(--bg-3); color: var(--fg); border-color: var(--border); }
+.dependency-link.is-undoped { border-color: var(--fg); background: var(--bg); }
 .dependency-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dependency-link small { color: var(--fg-muted); font-family: var(--font-mono); font-size: 11px; }
 .modal-topbar { position: sticky; top: 0; z-index: 7; width: 100%; padding: 12px clamp(20px, 5vw, 32px); min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 16px; background: var(--bg); border-bottom: 1px solid transparent; }
