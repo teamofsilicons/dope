@@ -5,7 +5,6 @@ const state = {
   allDopes: [],
   filters: { min: "", max: "", depsDoped: false, completedBy: "", from: "", to: "" },
   authMode: "login",
-  dependentHover: { sourceId: null, timer: null },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -110,7 +109,6 @@ async function init() {
 }
 
 async function loadRoute() {
-  clearDependentHover();
   state.route = location.hash.replace("#", "") || "active";
   if (!["active", "completed", "archived"].includes(state.route)) state.route = "active";
   document.querySelectorAll(".nav-links a").forEach((a) => a.classList.toggle("active", a.dataset.route === state.route));
@@ -178,7 +176,6 @@ function renderFilterButton() {
 }
 
 function render() {
-  clearDependentHover();
   renderFilterButton();
   const items = filteredDopes();
   const assigned = items.filter((d) => d.status === "active" && d.assigned_to);
@@ -189,7 +186,6 @@ function render() {
   document.querySelectorAll("[data-dope]").forEach((el) => {
     el.onclick = () => openDope(Number(el.dataset.dope));
   });
-  bindDependentHover();
 }
 
 function card(d) {
@@ -199,119 +195,10 @@ function card(d) {
   return `<button class="dope-card" data-dope="${d.id}">
     <span><h3>${escapeHtml(d.title)}</h3>${status ? `<span class="meta"><span>${status}</span></span>` : ""}</span>
     <span class="card-pills">
-      ${d.dependent_count ? `<span class="pill dependent-pill" data-dependent-source="${d.id}"><i class="ph ph-tree-structure"></i>${d.dependent_count} ${d.dependent_count === 1 ? "dependent" : "dependents"}</span>` : ""}
+      ${d.dependent_count ? `<span class="pill"><i class="ph ph-tree-structure"></i>${d.dependent_count} ${d.dependent_count === 1 ? "dependent" : "dependents"}</span>` : ""}
       <span class="pill"><i class="ph ph-clock"></i>${formatMinutes(d.time_minutes)}</span>
     </span>
   </button>`;
-}
-
-function dependentIdsFor(sourceId) {
-  return new Set(
-    state.dopes
-      .filter((d) => (d.dependencies || []).some((dep) => dep.id === sourceId))
-      .map((d) => d.id)
-  );
-}
-
-function bindDependentHover() {
-  const list = $("dope-list");
-  if (!list || state.route !== "active") return;
-  list.querySelectorAll("[data-dependent-source]").forEach((pill) => {
-    pill.onclick = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-    };
-    pill.onmouseenter = (event) => {
-      event.stopPropagation();
-      showDependentsOnly(Number(pill.dataset.dependentSource), pill);
-    };
-  });
-  list.onmouseenter = () => cancelDependentHoverClear();
-  list.onmouseleave = () => scheduleDependentHoverClear();
-}
-
-function showDependentsOnly(sourceId, trigger) {
-  const dependentIds = dependentIdsFor(sourceId);
-  if (!dependentIds.size) return;
-  cancelDependentHoverClear();
-  state.dependentHover.sourceId = sourceId;
-  const list = $("dope-list");
-  list.classList.add("dependent-hover-list");
-  list.querySelectorAll("[data-dope]").forEach((cardEl) => {
-    const id = Number(cardEl.dataset.dope);
-    const isSource = id === sourceId;
-    const isDependent = dependentIds.has(id);
-    cardEl.classList.toggle("dependent-hover-source", isSource);
-    cardEl.classList.toggle("dependent-hover-dependent", isDependent);
-    cardEl.classList.toggle("dependent-hover-hidden", !isSource && !isDependent);
-    cardEl.onmouseenter = () => cancelDependentHoverClear();
-  });
-  positionDependentHoverBridge(trigger);
-}
-
-function dependentHoverBridge() {
-  let bridge = $("dependent-hover-bridge");
-  if (!bridge) {
-    bridge = document.createElement("div");
-    bridge.id = "dependent-hover-bridge";
-    bridge.className = "dependent-hover-bridge";
-    bridge.onmouseenter = () => cancelDependentHoverClear();
-    bridge.onmouseleave = () => scheduleDependentHoverClear();
-    document.body.appendChild(bridge);
-  }
-  return bridge;
-}
-
-function positionDependentHoverBridge(trigger) {
-  const bridge = dependentHoverBridge();
-  const list = $("dope-list");
-  const firstDependent = list.querySelector(".dependent-hover-dependent");
-  if (!trigger || !firstDependent) {
-    bridge.hidden = true;
-    return;
-  }
-  const triggerRect = trigger.getBoundingClientRect();
-  const targetRect = firstDependent.getBoundingClientRect();
-  const listRect = list.getBoundingClientRect();
-  const top = triggerRect.bottom - 2;
-  const bottom = targetRect.top + 10;
-  if (bottom <= top) {
-    bridge.hidden = true;
-    return;
-  }
-  const left = Math.min(listRect.left, triggerRect.left) - 18;
-  const right = Math.max(listRect.right, triggerRect.right) + 18;
-  const sourceX = triggerRect.left + triggerRect.width / 2 - left;
-  bridge.hidden = false;
-  bridge.style.left = `${left}px`;
-  bridge.style.top = `${top}px`;
-  bridge.style.width = `${right - left}px`;
-  bridge.style.height = `${bottom - top}px`;
-  bridge.style.clipPath = `polygon(${sourceX}px 0, 100% 100%, 0 100%)`;
-}
-
-function cancelDependentHoverClear() {
-  clearTimeout(state.dependentHover.timer);
-  state.dependentHover.timer = null;
-}
-
-function scheduleDependentHoverClear() {
-  cancelDependentHoverClear();
-  state.dependentHover.timer = setTimeout(clearDependentHover, 180);
-}
-
-function clearDependentHover() {
-  clearTimeout(state.dependentHover.timer);
-  state.dependentHover = { sourceId: null, timer: null };
-  const bridge = $("dependent-hover-bridge");
-  if (bridge) bridge.hidden = true;
-  const list = $("dope-list");
-  if (!list) return;
-  list.classList.remove("dependent-hover-list");
-  list.querySelectorAll("[data-dope]").forEach((cardEl) => {
-    cardEl.classList.remove("dependent-hover-source", "dependent-hover-dependent", "dependent-hover-hidden");
-    cardEl.onmouseenter = null;
-  });
 }
 
 function escapeHtml(value) {
