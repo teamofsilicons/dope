@@ -252,6 +252,12 @@ function linkifyText(value) {
   });
 }
 
+function assignmentHistoryLine(d, h) {
+  const endedByCompletion = d.status === "completed" && h.unassigned_at === d.completed_at;
+  const endLabel = endedByCompletion ? "completed" : "unassigned";
+  return `${escapeHtml(h.display_name)} started this on ${fullDate(h.assigned_at)}${h.unassigned_at ? ` and ${endLabel} on ${fullDate(h.unassigned_at)}` : ""}`;
+}
+
 function dependencyPickerHtml(selectedIds = [], excludeId = null) {
   const selected = new Set(selectedIds.map(Number));
   const candidates = state.allDopes
@@ -364,7 +370,7 @@ async function openDope(id) {
   const history = d.assignment_history.length ? `
     <section class="history-block">
       <h2>Assignment History</h2>
-      <ul class="history">${d.assignment_history.map((h) => `<li>${escapeHtml(h.display_name)} tried this on ${fullDate(h.assigned_at)}${h.unassigned_at ? ` and unassigned on ${fullDate(h.unassigned_at)}` : ""}</li>`).join("")}</ul>
+      <ul class="history">${d.assignment_history.map((h) => `<li>${assignmentHistoryLine(d, h)}</li>`).join("")}</ul>
     </section>
   ` : "";
   const completionNotes = d.completion_description ? `
