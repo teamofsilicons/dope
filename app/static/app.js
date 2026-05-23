@@ -244,6 +244,14 @@ function sanitizeHtml(html) {
   return doc.body.innerHTML;
 }
 
+function linkifyText(value) {
+  return escapeHtml(value).replace(/https?:\/\/[^\s<]+/g, (url) => {
+    const cleanUrl = url.replace(/[.,;:)\]}]+$/, "");
+    const trailing = url.slice(cleanUrl.length);
+    return `<a href="${cleanUrl}" target="_blank" rel="noreferrer">${cleanUrl}</a>${trailing}`;
+  });
+}
+
 function dependencyPickerHtml(selectedIds = [], excludeId = null) {
   const selected = new Set(selectedIds.map(Number));
   const candidates = state.allDopes
@@ -359,7 +367,12 @@ async function openDope(id) {
       <ul class="history">${d.assignment_history.map((h) => `<li>${escapeHtml(h.display_name)} tried this on ${fullDate(h.assigned_at)}${h.unassigned_at ? ` and unassigned on ${fullDate(h.unassigned_at)}` : ""}</li>`).join("")}</ul>
     </section>
   ` : "";
-  const links = d.commit_links.length ? `<h2>Commits</h2><ul class="links">${d.commit_links.map((l) => `<li><a href="${escapeHtml(l)}" target="_blank" rel="noreferrer">${escapeHtml(l)}</a></li>`).join("")}</ul>` : "";
+  const completionNotes = d.completion_description ? `
+    <section class="completion-notes">
+      <h2>Completion Notes</h2>
+      <div class="completion-text">${linkifyText(d.completion_description)}</div>
+    </section>
+  ` : "";
   const blocked = (d.blocked_dependencies || []).length > 0;
   const sortedDependencies = [...(d.dependencies || [])].sort((a, b) => {
     const aUndoped = a.status !== "completed";
@@ -403,8 +416,7 @@ async function openDope(id) {
       <h2 id="dope-version-title">${escapeHtml(activeVersion.title)}</h2>
       ${dependencies}
       <div id="dope-version-description" class="description">${sanitizeHtml(activeVersion.description_html)}</div>
-      ${d.completion_description ? `<h2>Completion Notes</h2><p class="muted">${escapeHtml(d.completion_description)}</p>` : ""}
-      ${links}
+      ${completionNotes}
       ${history}
     </div>
     <div class="modal-action-bar">
