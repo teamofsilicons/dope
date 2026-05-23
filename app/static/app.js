@@ -441,7 +441,12 @@ async function openDope(id) {
   const editCount = Math.max(0, versions.length - 1);
   const activeVersion = versions[0] || { title: d.title, description_html: d.description_html, edited_at: d.created_at, version_number: 1 };
   const versionOptions = versions.map((v) => `<option value="${v.version_number}">v${v.version_number} - ${localDate(v.edited_at)} by ${escapeHtml(v.edited_by?.display_name || "someone")}</option>`).join("");
-  const history = d.assignment_history.length ? `<h2>Assignment History</h2><ul class="history">${d.assignment_history.map((h) => `<li>${escapeHtml(h.display_name)} tried this on ${fullDate(h.assigned_at)}${h.unassigned_at ? ` and unassigned on ${fullDate(h.unassigned_at)}` : ""}</li>`).join("")}</ul>` : "";
+  const history = d.assignment_history.length ? `
+    <section class="history-block">
+      <h2>Assignment History</h2>
+      <ul class="history">${d.assignment_history.map((h) => `<li>${escapeHtml(h.display_name)} tried this on ${fullDate(h.assigned_at)}${h.unassigned_at ? ` and unassigned on ${fullDate(h.unassigned_at)}` : ""}</li>`).join("")}</ul>
+    </section>
+  ` : "";
   const links = d.commit_links.length ? `<h2>Commits</h2><ul class="links">${d.commit_links.map((l) => `<li><a href="${escapeHtml(l)}" target="_blank" rel="noreferrer">${escapeHtml(l)}</a></li>`).join("")}</ul>` : "";
   const blocked = (d.blocked_dependencies || []).length > 0;
   const sortedDependencies = [...(d.dependencies || [])].sort((a, b) => {
