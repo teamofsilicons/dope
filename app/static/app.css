@@ -150,6 +150,15 @@ dialog::backdrop { background: rgba(26,26,26,0.42); backdrop-filter: blur(4px); 
 .links a { color: var(--blue); overflow-wrap: anywhere; }
 .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 30; background: var(--fg); color: var(--bg); padding: 12px 14px; font-weight: 800; box-shadow: 0 18px 54px -28px rgba(0,0,0,0.6); max-width: calc(100% - 24px); }
 .undo { margin-left: 10px; min-height: 30px; padding: 0 10px; border-color: var(--bg); color: var(--bg); background: transparent; }
+.dope-celebration { position: fixed; inset: 0; z-index: 50; pointer-events: none; display: grid; place-items: center; overflow: hidden; background: rgba(26,26,26,0.08); animation: celebration-fade 1.8s ease forwards; }
+.celebration-card { border: 1px solid var(--fg); background: var(--fg); color: var(--bg); min-width: min(320px, calc(100vw - 48px)); padding: 22px; display: grid; justify-items: center; gap: 8px; box-shadow: 0 24px 80px -36px rgba(0,0,0,0.65); animation: celebration-pop 0.7s cubic-bezier(.2,.9,.2,1) both; }
+.celebration-card i { font-size: 34px; }
+.celebration-card strong { font-size: clamp(36px, 10vw, 74px); line-height: 0.95; letter-spacing: -0.055em; }
+.celebration-card span { color: var(--bg-2); font-weight: 800; }
+.celebration-piece { position: absolute; top: -40px; color: var(--fg); background: var(--bg-3); border: 1px solid var(--border); padding: 5px 8px; font-family: var(--font-mono); font-size: 11px; font-weight: 800; animation-name: celebration-fall; animation-timing-function: cubic-bezier(.16,.84,.44,1); animation-fill-mode: both; }
+@keyframes celebration-pop { 0% { opacity: 0; transform: translateY(18px) scale(0.92); } 70% { opacity: 1; transform: translateY(0) scale(1.02); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes celebration-fall { 0% { opacity: 0; transform: translateY(0) rotate(0deg); } 12% { opacity: 1; } 100% { opacity: 0; transform: translateY(110vh) rotate(24deg); } }
+@keyframes celebration-fade { 0%, 72% { opacity: 1; } 100% { opacity: 0; } }
 
 @media (max-width: 720px) {
   .site-head { grid-template-columns: 1fr auto; height: auto; min-height: var(--nav-h); padding-top: 10px; padding-bottom: 10px; }

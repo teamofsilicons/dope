@@ -69,6 +69,31 @@ function toast(message, undo) {
   el._timer = setTimeout(() => { el.hidden = true; }, 10000);
 }
 
+function celebrateDope() {
+  const existing = $("dope-celebration");
+  if (existing) existing.remove();
+  const shell = document.createElement("div");
+  shell.id = "dope-celebration";
+  shell.className = "dope-celebration";
+  const marks = ["Doped", "Ship it", "Done", "Amended"];
+  shell.innerHTML = `
+    <div class="celebration-card">
+      <i class="ph ph-confetti"></i>
+      <strong>Doped</strong>
+      <span>Commit links locked in.</span>
+    </div>
+    ${Array.from({ length: 24 }, (_, i) => {
+      const x = 8 + Math.random() * 84;
+      const delay = Math.random() * 0.2;
+      const duration = 0.75 + Math.random() * 0.45;
+      const label = marks[i % marks.length];
+      return `<span class="celebration-piece" style="left:${x}%; animation-delay:${delay}s; animation-duration:${duration}s;">${escapeHtml(label)}</span>`;
+    }).join("")}
+  `;
+  document.body.appendChild(shell);
+  setTimeout(() => shell.remove(), 1800);
+}
+
 function showAuth() {
   $("auth-view").hidden = false;
   $("app-view").hidden = true;
@@ -522,6 +547,7 @@ function openCompleteDope(d) {
       await api(`/api/dopes/${d.id}/complete`, { method: "POST", body: JSON.stringify({ completion_text: $("completion-text").value }) });
       $("dope-dialog").close();
       await loadRoute();
+      celebrateDope();
       toast("Dope completed");
     } catch (err) { toast(err.message); }
   };
