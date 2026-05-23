@@ -5,18 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ede8e0">
   <title>Dopes</title>
-  <link rel="icon" type="image/png" href="/static/si-logo-light.png?v=20260524-progress1">
-  <link rel="apple-touch-icon" href="/static/si-logo-light.png?v=20260524-progress1">
+  <link rel="icon" type="image/png" href="/static/si-logo-light.png?v=20260524-loading1">
+  <link rel="apple-touch-icon" href="/static/si-logo-light.png?v=20260524-loading1">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2/src/regular/style.css">
-  <link rel="stylesheet" href="/static/app.css?v=20260524-progress1">
+  <link rel="stylesheet" href="/static/app.css?v=20260524-loading1">
   <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
-  <script src="/static/app.js?v=20260524-progress1" defer></script>
+  <script src="/static/app.js?v=20260524-loading1" defer></script>
 </head>
 <body>
   <div id="toast" class="toast" hidden></div>
+
+  <main id="loading-view" class="loading-shell">
+    <section class="loading-card" aria-live="polite" aria-busy="true">
+      <img class="mark" src="/static/si-logo-light.png" alt="" width="34" height="34">
+      <div>
+        <p class="kicker">Team of Silicons</p>
+        <h1>Dopes</h1>
+      </div>
+      <span class="loading-bar"><span></span></span>
+    </section>
+  </main>
 
   <main id="auth-view" class="auth-shell" hidden>
     <section class="auth-panel">
@@ -35,6 +46,9 @@
   </main>
 
   <main id="app-view" hidden>
+    <div id="route-loading" class="route-loading" hidden>
+      <span class="loading-bar"><span></span></span>
+    </div>
     <header class="site-head">
       <a href="#active" class="site-logo"><img class="mark" src="/static/si-logo-light.png" alt="" width="28" height="28"><span>Dopes</span></a>
       <nav class="nav-links">

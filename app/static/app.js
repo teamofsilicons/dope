@@ -7,6 +7,7 @@ const state = {
   progressDays: 7,
   filters: { min: "", max: "", depsDoped: false, completedBy: "", from: "", to: "" },
   authMode: "login",
+  booted: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -100,18 +101,31 @@ function celebrateDope() {
 }
 
 function showAuth() {
+  $("loading-view").hidden = true;
+  $("loading-view").style.display = "none";
   $("auth-view").hidden = false;
   $("app-view").hidden = true;
   $("auth-view").style.display = "grid";
   $("app-view").style.display = "none";
 }
 
-function showApp() {
+function hideInitialLoading() {
+  $("loading-view").hidden = true;
+  $("loading-view").style.display = "none";
+}
+
+function showApp(keepLoading = false) {
+  if (!keepLoading) hideInitialLoading();
   $("auth-view").hidden = true;
   $("app-view").hidden = false;
   $("auth-view").style.display = "none";
   $("app-view").style.display = "block";
   $("user-name").textContent = state.user.display_name;
+}
+
+function setRouteLoading(loading) {
+  const el = $("route-loading");
+  if (el) el.hidden = !loading;
 }
 
 function updateAuthMode() {
@@ -127,40 +141,50 @@ async function init() {
   try {
     state.user = await api("/api/me");
   } catch {
+    state.booted = true;
     showAuth();
     return;
   }
-  showApp();
+  showApp(true);
   try {
     await loadRoute();
   } catch (err) {
     toast(err.message || "Could not load dopes");
+  } finally {
+    state.booted = true;
+    hideInitialLoading();
+    setRouteLoading(false);
   }
 }
 
 async function loadRoute() {
-  state.route = location.hash.replace("#", "") || "active";
-  if (!["active", "completed", "archived"].includes(state.route)) state.route = "active";
-  const isActive = state.route === "active";
-  document.querySelectorAll(".nav-links a").forEach((a) => a.classList.toggle("active", a.dataset.route === state.route));
-  $("page-title").textContent = isActive ? "Active Dopes" : state.route === "completed" ? "Completed Dopes" : "Archived Dopes";
-  $("page-title").classList.toggle("compact-title", isActive);
-  $("page-subtitle").textContent = state.route === "active" ? "Product work waiting to be amended." : state.route === "completed" ? "Work closed with commit links." : "Dopes moved out of the main queue.";
-  $("page-subtitle").hidden = isActive;
-  $("progress-panel").hidden = !isActive;
-  $("new-dope").style.display = isActive ? "inline-flex" : "none";
-  $("active-assigned-wrap").style.display = isActive ? "block" : "none";
-  $("completed-filters").style.display = state.route === "completed" ? "block" : "none";
-  if (isActive) {
-    [state.dopes, state.progress] = await Promise.all([
-      api(`/api/dopes?status=${state.route}`),
-      api(`/api/stats/progress?days=${state.progressDays}`),
-    ]);
-  } else {
-    state.dopes = await api(`/api/dopes?status=${state.route}`);
+  if (state.booted) setRouteLoading(true);
+  try {
+    state.route = location.hash.replace("#", "") || "active";
+    if (!["active", "completed", "archived"].includes(state.route)) state.route = "active";
+    const isActive = state.route === "active";
+    document.querySelectorAll(".nav-links a").forEach((a) => a.classList.toggle("active", a.dataset.route === state.route));
+    $("page-title").textContent = isActive ? "Active Dopes" : state.route === "completed" ? "Completed Dopes" : "Archived Dopes";
+    $("page-title").classList.toggle("compact-title", isActive);
+    $("page-subtitle").textContent = state.route === "active" ? "Product work waiting to be amended." : state.route === "completed" ? "Work closed with commit links." : "Dopes moved out of the main queue.";
+    $("page-subtitle").hidden = isActive;
+    $("progress-panel").hidden = !isActive;
+    $("new-dope").style.display = isActive ? "inline-flex" : "none";
+    $("active-assigned-wrap").style.display = isActive ? "block" : "none";
+    $("completed-filters").style.display = state.route === "completed" ? "block" : "none";
+    if (isActive) {
+      [state.dopes, state.progress] = await Promise.all([
+        api(`/api/dopes?status=${state.route}`),
+        api(`/api/stats/progress?days=${state.progressDays}`),
+      ]);
+    } else {
+      state.dopes = await api(`/api/dopes?status=${state.route}`);
+    }
+    state.allDopes = [];
+    render();
+  } finally {
+    setRouteLoading(false);
   }
-  state.allDopes = [];
-  render();
 }
 
 async function ensureAllDopes(force = false) {
@@ -750,5 +774,11 @@ $("progress-chart").addEventListener("pointermove", moveProgressTooltip);
 $("progress-chart").addEventListener("pointerout", (event) => {
   if (!event.relatedTarget || !event.relatedTarget.closest?.("[data-progress-tip]")) hideProgressTooltip();
 });
-window.addEventListener("hashchange", loadRoute);
+window.addEventListener("hashchange", async () => {
+  try {
+    await loadRoute();
+  } catch (err) {
+    toast(err.message || "Could not load dopes");
+  }
+});
 init();
