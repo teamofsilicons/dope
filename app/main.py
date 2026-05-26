@@ -73,6 +73,7 @@ def init_db() -> None:
               username TEXT NOT NULL UNIQUE COLLATE NOCASE,
               password_hash TEXT NOT NULL,
               display_name TEXT NOT NULL,
+              color TEXT NOT NULL DEFAULT '#1a1a1a',
               created_at TEXT NOT NULL
             );
 
@@ -145,6 +146,12 @@ def init_db() -> None:
         }
         if "unassign_reason" not in assignment_columns:
             conn.execute("ALTER TABLE assignment_history ADD COLUMN unassign_reason TEXT")
+        user_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "color" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN color TEXT NOT NULL DEFAULT '#1a1a1a'")
 
 
 @app.on_event("startup")
@@ -243,6 +250,11 @@ class CompleteIn(BaseModel):
     completion_description: str = Field(default="", max_length=20_000)
 
 
+class ProfileIn(BaseModel):
+    display_name: str = Field(min_length=1, max_length=120)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+
+
 def parse_time_to_minutes(value: str) -> int:
     text = value.strip().lower()
     token_re = re.compile(r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m)?")
@@ -282,7 +294,13 @@ def status_for(row: sqlite3.Row) -> str:
 def user_public(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if not row:
         return None
-    return {"id": row["id"], "username": row["username"], "display_name": row["display_name"]}
+    return {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}
+
+
+def normalize_color(value: str | None, fallback: str = "#1a1a1a") -> str:
+    if value and re.match(r"^#[0-9a-fA-F]{6}$", value):
+        return value.lower()
+    return fallback
 
 
 def add_dope_version(
@@ -368,6 +386,31 @@ def set_dope_dependencies(conn: sqlite3.Connection, dope_id: int, dependency_ids
     )
 
 
+def active_dependent_count(conn: sqlite3.Connection, dope_id: int) -> int:
+    edges = conn.execute(
+        """
+        SELECT dd.dope_id, dd.depends_on_id
+        FROM dope_dependencies dd
+        JOIN dopes child ON child.id = dd.dope_id
+        WHERE child.archived_at IS NULL
+          AND child.completed_at IS NULL
+        """
+    ).fetchall()
+    reverse_graph: dict[int, list[int]] = {}
+    for edge in edges:
+        reverse_graph.setdefault(edge["depends_on_id"], []).append(edge["dope_id"])
+
+    dependents: set[int] = set()
+    stack = list(reverse_graph.get(dope_id, []))
+    while stack:
+        current = stack.pop()
+        if current in dependents:
+            continue
+        dependents.add(current)
+        stack.extend(reverse_graph.get(current, []))
+    return len(dependents)
+
+
 def incomplete_dependency_rows(conn: sqlite3.Connection, dope_id: int) -> list[sqlite3.Row]:
     return conn.execute(
         """
@@ -417,17 +460,7 @@ def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection) -> dict[str, Any]:
         """,
         (row["id"],),
     ).fetchall()
-    dependent_count = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM dope_dependencies dd
-        JOIN dopes child ON child.id = dd.dope_id
-        WHERE dd.depends_on_id = ?
-          AND child.archived_at IS NULL
-          AND child.completed_at IS NULL
-        """,
-        (row["id"],),
-    ).fetchone()[0]
+    dependent_count = active_dependent_count(conn, row["id"])
     blocked_dependencies = [dep for dep in dependencies if dep["completed_at"] is None]
     return {
         "id": row["id"],
@@ -477,6 +510,7 @@ def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection) -> dict[str, Any]:
                     "id": v["edited_by"],
                     "username": v["editor_username"],
                     "display_name": v["editor_display_name"],
+                    "color": "#1a1a1a",
                 },
             }
             for v in versions
@@ -525,6 +559,22 @@ def logout(response: Response) -> dict[str, Any]:
 @app.get("/api/me")
 def me(user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> dict[str, Any]:
     return user_public(current_user(user_cookie))  # type: ignore[return-value]
+
+
+@app.patch("/api/me")
+def update_me(data: ProfileIn, user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> dict[str, Any]:
+    user = current_user(user_cookie)
+    display_name = data.display_name.strip()
+    if not display_name:
+        raise HTTPException(status_code=400, detail="Display name is required")
+    color = normalize_color(data.color)
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET display_name = ?, color = ? WHERE id = ?",
+            (display_name, color, user["id"]),
+        )
+        updated = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    return user_public(updated)  # type: ignore[return-value]
 
 
 @app.get("/api/dopes")
@@ -596,7 +646,18 @@ def list_dopes(status: str = "active", user_cookie: str | None = Cookie(default=
         order = "completed_at DESC, id DESC" if status == "completed" else "id DESC"
     with db() as conn:
         rows = conn.execute(f"SELECT * FROM dopes WHERE {where} ORDER BY {order}").fetchall()
-        return [dope_payload(row, conn) for row in rows]
+        payloads = [dope_payload(row, conn) for row in rows]
+    if status == "active":
+        def active_sort_key(item: dict[str, Any]) -> tuple[int, int, str, int]:
+            dependency_count = len([dep for dep in item["dependencies"] if dep["status"] != "archived"])
+            if item["dependent_count"]:
+                return (0, -int(item["dependent_count"]), item["title"].lower(), -int(item["id"]))
+            if dependency_count == 0:
+                return (1, 0, item["title"].lower(), -int(item["id"]))
+            return (2, dependency_count, item["title"].lower(), -int(item["id"]))
+
+        payloads.sort(key=active_sort_key)
+    return payloads
 
 
 @app.get("/api/stats/progress")
@@ -613,7 +674,7 @@ def progress_stats(days: int = 7, user_cookie: str | None = Cookie(default=None,
     with db() as conn:
         rows = conn.execute(
             """
-            SELECT d.time_minutes, d.completed_at, u.id AS user_id, u.display_name
+            SELECT d.time_minutes, d.completed_at, u.id AS user_id, u.display_name, u.color
             FROM dopes d
             JOIN users u ON u.id = d.completed_by
             WHERE d.archived_at IS NULL
@@ -630,7 +691,13 @@ def progress_stats(days: int = 7, user_cookie: str | None = Cookie(default=None,
             continue
         stack = buckets[day].setdefault(
             row["user_id"],
-            {"user_id": row["user_id"], "display_name": row["display_name"], "minutes": 0, "count": 0},
+            {
+                "user_id": row["user_id"],
+                "display_name": row["display_name"],
+                "color": normalize_color(row["color"]),
+                "minutes": 0,
+                "count": 0,
+            },
         )
         stack["minutes"] += int(row["time_minutes"])
         stack["count"] += 1

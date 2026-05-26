@@ -5,15 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ede8e0">
   <title>Dopes</title>
-  <link rel="icon" type="image/png" href="/static/si-logo-light.png?v=20260524-loading1">
-  <link rel="apple-touch-icon" href="/static/si-logo-light.png?v=20260524-loading1">
+  <link rel="icon" type="image/png" href="/static/si-logo-light.png?v=20260527-profile1">
+  <link rel="apple-touch-icon" href="/static/si-logo-light.png?v=20260527-profile1">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2/src/regular/style.css">
-  <link rel="stylesheet" href="/static/app.css?v=20260524-loading1">
+  <link rel="stylesheet" href="/static/app.css?v=20260527-profile1">
   <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
-  <script src="/static/app.js?v=20260524-loading1" defer></script>
+  <script src="/static/app.js?v=20260527-profile1" defer></script>
 </head>
 <body>
   <div id="toast" class="toast" hidden></div>
@@ -56,7 +56,10 @@
         <a href="#completed" data-route="completed">Completed</a>
         <a href="#archived" data-route="archived">Archived</a>
       </nav>
-      <div class="user-chip"><span id="user-name"></span><button id="logout" title="Sign out"><i class="ph ph-sign-out"></i></button></div>
+      <div class="user-chip">
+        <button id="profile-open" class="profile-chip" title="Profile"><span id="user-color-dot"></span><span id="user-name"></span></button>
+        <button id="logout" title="Sign out"><i class="ph ph-sign-out"></i></button>
+      </div>
     </header>
 
     <section class="page-shell">
@@ -126,6 +129,27 @@
       <div class="modal-actions">
         <button id="filter-apply" value="default">Apply filters</button>
         <button id="filter-reset" class="secondary" value="default">Reset filters</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="profile-dialog">
+    <form method="dialog" class="modal small">
+      <button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button>
+      <h2>Profile</h2>
+      <label>Display name<input id="profile-display-name" autocomplete="name" placeholder="Display name"></label>
+      <label>Graph color
+        <div class="color-field">
+          <input id="profile-color" type="color" aria-label="Graph color">
+          <input id="profile-color-hex" autocomplete="off" spellcheck="false" placeholder="#1a1a1a">
+        </div>
+      </label>
+      <div class="color-preview">
+        <span id="profile-color-preview"></span>
+        <span>Your progress chart block color</span>
+      </div>
+      <div class="modal-actions">
+        <button id="profile-save" value="default">Save profile</button>
       </div>
     </form>
   </dialog>

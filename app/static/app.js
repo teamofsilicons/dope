@@ -11,6 +11,46 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+const CACHE_PREFIX = "dope-cache:";
+const DRAFT_PREFIX = "dope-draft:";
+const DEFAULT_COLOR = "#1a1a1a";
+
+function storageRead(prefix, key, fallback = null) {
+  try {
+    const raw = localStorage.getItem(`${prefix}${key}`);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function storageWrite(prefix, key, value) {
+  try { localStorage.setItem(`${prefix}${key}`, JSON.stringify(value)); } catch {}
+}
+
+function storageRemove(prefix, key) {
+  try { localStorage.removeItem(`${prefix}${key}`); } catch {}
+}
+
+function cacheRead(key, fallback = null) {
+  return storageRead(CACHE_PREFIX, key, fallback);
+}
+
+function cacheWrite(key, value) {
+  storageWrite(CACHE_PREFIX, key, value);
+}
+
+function draftRead(key, fallback = {}) {
+  return storageRead(DRAFT_PREFIX, key, fallback) || fallback;
+}
+
+function draftWrite(key, value) {
+  storageWrite(DRAFT_PREFIX, key, value);
+}
+
+function draftRemove(key) {
+  storageRemove(DRAFT_PREFIX, key);
+}
 
 function minutesFromText(value) {
   const text = String(value || "").trim().toLowerCase();
@@ -121,6 +161,7 @@ function showApp(keepLoading = false) {
   $("auth-view").style.display = "none";
   $("app-view").style.display = "block";
   $("user-name").textContent = state.user.display_name;
+  $("user-color-dot").style.background = state.user.color || DEFAULT_COLOR;
 }
 
 function setRouteLoading(loading) {
@@ -138,9 +179,22 @@ function updateAuthMode() {
 
 async function init() {
   updateAuthMode();
+  state.filters = { ...state.filters, ...draftRead("filters", {}) };
   try {
     state.user = await api("/api/me");
+    cacheWrite("me", state.user);
   } catch {
+    const cachedUser = cacheRead("me");
+    if (cachedUser) {
+      state.user = cachedUser;
+      showApp(true);
+      await loadRoute();
+      state.booted = true;
+      hideInitialLoading();
+      setRouteLoading(false);
+      toast("Offline cache");
+      return;
+    }
     state.booted = true;
     showAuth();
     return;
@@ -172,15 +226,27 @@ async function loadRoute() {
     $("new-dope").style.display = isActive ? "inline-flex" : "none";
     $("active-assigned-wrap").style.display = isActive ? "block" : "none";
     $("completed-filters").style.display = state.route === "completed" ? "block" : "none";
-    if (isActive) {
-      [state.dopes, state.progress] = await Promise.all([
-        api(`/api/dopes?status=${state.route}`),
-        api(`/api/stats/progress?days=${state.progressDays}`),
-      ]);
-    } else {
-      state.dopes = await api(`/api/dopes?status=${state.route}`);
+    const cachedDopes = cacheRead(`dopes:${state.route}`);
+    const cachedProgress = cacheRead(`progress:${state.progressDays}`);
+    if (cachedDopes) state.dopes = cachedDopes;
+    if (isActive && cachedProgress) state.progress = cachedProgress;
+    if (cachedDopes) render();
+    try {
+      if (isActive) {
+        [state.dopes, state.progress] = await Promise.all([
+          api(`/api/dopes?status=${state.route}`),
+          api(`/api/stats/progress?days=${state.progressDays}`),
+        ]);
+        cacheWrite(`progress:${state.progressDays}`, state.progress);
+      } else {
+        state.dopes = await api(`/api/dopes?status=${state.route}`);
+      }
+      cacheWrite(`dopes:${state.route}`, state.dopes);
+      state.allDopes = [];
+    } catch (err) {
+      if (!cachedDopes) throw err;
+      toast("Showing offline cache");
     }
-    state.allDopes = [];
     render();
   } finally {
     setRouteLoading(false);
@@ -189,7 +255,19 @@ async function loadRoute() {
 
 async function ensureAllDopes(force = false) {
   if (!force && state.allDopes.length) return state.allDopes;
-  state.allDopes = await api("/api/dopes?status=all");
+  const cached = cacheRead("dopes:all");
+  if (!force && cached) {
+    state.allDopes = cached;
+    return state.allDopes;
+  }
+  try {
+    state.allDopes = await api("/api/dopes?status=all");
+    cacheWrite("dopes:all", state.allDopes);
+  } catch (err) {
+    if (!cached) throw err;
+    state.allDopes = cached;
+    toast("Showing offline cache");
+  }
   return state.allDopes;
 }
 
@@ -254,9 +332,10 @@ function render() {
   });
 }
 
-function progressColor(userId) {
+function progressColor(stack) {
+  if (/^#[0-9a-fA-F]{6}$/.test(stack.color || "")) return stack.color;
   const colors = ["#1a1a1a", "#5a5a5a", "#8b8b8b", "#2e6f8e", "#5a9a6b", "#7a4d8e", "#9a4d42"];
-  return colors[Math.abs(Number(userId) || 0) % colors.length];
+  return colors[Math.abs(Number(stack.user_id) || 0) % colors.length];
 }
 
 function dopeCountLabel(count) {
@@ -276,7 +355,7 @@ function renderProgressChart() {
     const stacks = day.stacks.length ? day.stacks.map((stack) => {
       const width = Math.max(2, (stack.minutes / maxMinutes) * 100);
       const tip = `${stack.display_name}\n${formatMinutes(stack.minutes)}\n${dopeCountLabel(stack.count)}`;
-      return `<span class="progress-stack" style="width:${width}%;background:${progressColor(stack.user_id)}" data-progress-tip="${escapeHtml(tip)}" aria-label="${escapeHtml(tip)}"></span>`;
+      return `<span class="progress-stack" style="width:${width}%;background:${progressColor(stack)}" data-progress-tip="${escapeHtml(tip)}" aria-label="${escapeHtml(tip)}"></span>`;
     }).join("") : `<span class="progress-empty"></span>`;
     return `
       <div class="progress-row">
@@ -363,7 +442,7 @@ function assignmentHistoryLine(d, h) {
 function dependencyPickerHtml(selectedIds = [], excludeId = null) {
   const selected = new Set(selectedIds.map(Number));
   const candidates = state.allDopes
-    .filter((d) => d.id !== excludeId && d.status !== "archived")
+    .filter((d) => d.id !== excludeId && d.status !== "archived" && (d.status !== "completed" || selected.has(d.id)))
     .sort((a, b) => a.title.localeCompare(b.title));
   const options = candidates.length ? candidates.map((d) => `
     <label class="dependency-option" data-dependency-option-row>
@@ -409,22 +488,62 @@ function selectedDependencyIds() {
   return [...document.querySelectorAll("[data-dependency-option]:checked")].map((input) => Number(input.value));
 }
 
+function bindDraftFields(key, fields) {
+  const save = () => {
+    const draft = {};
+    fields.forEach(([name, id, kind = "value"]) => {
+      const el = $(id);
+      if (!el) return;
+      if (kind === "html") draft[name] = el.innerHTML;
+      else if (kind === "checked-list") draft[name] = selectedDependencyIds();
+      else if (el.type === "checkbox") draft[name] = el.checked;
+      else draft[name] = el.value;
+    });
+    draftWrite(key, draft);
+  };
+  fields.forEach(([, id, kind = "value"]) => {
+    const el = $(id);
+    if (!el) return;
+    const eventName = kind === "checked-list" ? "change" : "input";
+    el.addEventListener(eventName, save);
+  });
+  document.querySelectorAll("[data-dependency-option]").forEach((input) => input.addEventListener("change", save));
+  return save;
+}
+
+function preventSearchSubmit(root = document) {
+  root.querySelectorAll('input[type="search"], input[id*="search"], input[name*="query"]').forEach((input) => {
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") event.preventDefault();
+    });
+  });
+}
+
 async function openNewDope() {
   await ensureAllDopes(true);
+  const draftKey = "new-dope";
+  const draft = draftRead(draftKey);
   $("modal-title").hidden = true;
   $("modal-title").textContent = "New Dope";
   $("modal-body").innerHTML = `
     <div class="modal-topbar is-visible"><strong>New Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
     <div class="modal-content">
-      <label>Title<input id="new-title" name="dope_new_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" placeholder="Improve onboarding empty state"></label>
-      <label>Description<div id="new-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here."></div></label>
-      <label>Time to complete<input id="new-time" name="dope_new_time" autocomplete="off" placeholder="2hr, 30min, 0.5hr"></label>
-      ${dependencyPickerHtml()}
+      <label>Title<input id="new-title" name="dope_new_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" placeholder="Improve onboarding empty state" value="${escapeHtml(draft.title || "")}"></label>
+      <label>Description<div id="new-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(draft.description_html || "")}</div></label>
+      <label>Time to complete<input id="new-time" name="dope_new_time" autocomplete="off" placeholder="2hr, 30min, 0.5hr" value="${escapeHtml(draft.time_text || "")}"></label>
+      ${dependencyPickerHtml(draft.dependency_ids || [])}
     </div>
     <div class="modal-action-bar"><button id="create-dope" class="primary-wide" value="default">Create Dope</button></div>
   `;
   wireEditor($("new-description"));
-  bindDependencyPicker();
+  bindDependencyPicker(Boolean((draft.dependency_ids || []).length));
+  preventSearchSubmit($("modal-body"));
+  bindDraftFields(draftKey, [
+    ["title", "new-title"],
+    ["description_html", "new-description", "html"],
+    ["time_text", "new-time"],
+    ["dependency_ids", "dependency-panel", "checked-list"],
+  ]);
   $("create-dope").onclick = async (event) => {
     event.preventDefault();
     try {
@@ -437,6 +556,7 @@ async function openNewDope() {
           dependency_ids: selectedDependencyIds(),
         }),
       });
+      draftRemove(draftKey);
       $("dope-dialog").close();
       await loadRoute();
       toast("Dope created");
@@ -585,18 +705,21 @@ function bindDopeActions(d) {
 }
 
 function openUnassignDope(d) {
+  const draftKey = `unassign:${d.id}`;
+  const draft = draftRead(draftKey);
   $("modal-title").hidden = true;
   $("modal-title").textContent = "Unassign Dope";
   $("modal-body").innerHTML = `
     <div class="modal-topbar is-visible"><strong>Unassign Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
     <div class="modal-content">
       <h2>${escapeHtml(d.title)}</h2>
-      <label>Reason<input id="unassign-reason" name="dope_unassign_reason" autocomplete="off" maxlength="500" required placeholder="What blocked this?"></label>
+      <label>Reason<input id="unassign-reason" name="dope_unassign_reason" autocomplete="off" maxlength="500" required placeholder="What blocked this?" value="${escapeHtml(draft.reason || "")}"></label>
     </div>
     <div class="modal-action-bar">
       <button id="confirm-unassign" class="primary-wide" value="default"><i class="ph ph-user-minus"></i>Unassign Dope</button>
     </div>
   `;
+  bindDraftFields(draftKey, [["reason", "unassign-reason"]]);
   $("confirm-unassign").onclick = async (event) => {
     event.preventDefault();
     try {
@@ -604,6 +727,7 @@ function openUnassignDope(d) {
         method: "POST",
         body: JSON.stringify({ reason: $("unassign-reason").value }),
       });
+      draftRemove(draftKey);
       $("dope-dialog").close();
       await loadRoute();
       toast("Dope unassigned");
@@ -642,21 +766,30 @@ function bindModalChrome(title) {
 
 async function openEditDope(d) {
   await ensureAllDopes(true);
+  const draftKey = `edit-dope:${d.id}`;
+  const draft = draftRead(draftKey);
+  const selectedDeps = draft.dependency_ids || (d.dependencies || []).map((dep) => dep.id);
   $("modal-title").hidden = true;
   $("modal-title").textContent = "Edit Dope";
   $("modal-body").innerHTML = `
     <div class="modal-topbar is-visible"><strong>Edit Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
     <div class="modal-content">
-      <label>Title<input id="edit-title" name="dope_edit_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" value="${escapeHtml(d.title)}"></label>
-      <label>Description<div id="edit-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(d.description_html)}</div></label>
-      ${dependencyPickerHtml((d.dependencies || []).map((dep) => dep.id), d.id)}
+      <label>Title<input id="edit-title" name="dope_edit_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" value="${escapeHtml(draft.title || d.title)}"></label>
+      <label>Description<div id="edit-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(draft.description_html || d.description_html)}</div></label>
+      ${dependencyPickerHtml(selectedDeps, d.id)}
     </div>
     <div class="modal-action-bar">
       <button id="save-edit" class="primary-wide" value="default"><i class="ph ph-floppy-disk"></i>Save edit</button>
     </div>
   `;
   wireEditor($("edit-description"));
-  bindDependencyPicker((d.dependencies || []).length > 0);
+  bindDependencyPicker(selectedDeps.length > 0);
+  preventSearchSubmit($("modal-body"));
+  bindDraftFields(draftKey, [
+    ["title", "edit-title"],
+    ["description_html", "edit-description", "html"],
+    ["dependency_ids", "dependency-panel", "checked-list"],
+  ]);
   $("save-edit").onclick = async (event) => {
     event.preventDefault();
     try {
@@ -670,6 +803,7 @@ async function openEditDope(d) {
       });
       state.dopes = state.dopes.map((item) => item.id === updated.id ? updated : item);
       state.allDopes = state.allDopes.map((item) => item.id === updated.id ? updated : item);
+      draftRemove(draftKey);
       toast("Edit saved");
       await openDope(updated.id);
     } catch (err) { toast(err.message); }
@@ -677,28 +811,78 @@ async function openEditDope(d) {
 }
 
 function openCompleteDope(d) {
+  const draftKey = `complete:${d.id}`;
+  const draft = draftRead(draftKey);
   $("modal-title").hidden = true;
   $("modal-title").textContent = "Doped";
   $("modal-body").innerHTML = `
     <div class="modal-topbar is-visible"><strong>Doped</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
     <div class="modal-content">
       <h2>${escapeHtml(d.title)}</h2>
-      <label>Doped description with commit links<textarea id="completion-text" rows="12" placeholder="Write what changed and include at least one commit link"></textarea></label>
+      <label>Doped description with commit links<textarea id="completion-text" rows="12" placeholder="Write what changed and include at least one commit link">${escapeHtml(draft.completion_text || "")}</textarea></label>
     </div>
     <div class="modal-action-bar">
       <button id="confirm-complete" class="primary-wide" value="default"><i class="ph ph-confetti"></i>Doped</button>
     </div>
   `;
+  bindDraftFields(draftKey, [["completion_text", "completion-text"]]);
   $("confirm-complete").onclick = async (event) => {
     event.preventDefault();
     try {
       await api(`/api/dopes/${d.id}/complete`, { method: "POST", body: JSON.stringify({ completion_text: $("completion-text").value }) });
+      draftRemove(draftKey);
       $("dope-dialog").close();
       await loadRoute();
       celebrateDope();
       toast("Dope completed");
     } catch (err) { toast(err.message); }
   };
+}
+
+function syncProfileColorInputs(source) {
+  const color = source === "hex" ? $("profile-color-hex").value : $("profile-color").value;
+  if (!/^#[0-9a-fA-F]{6}$/.test(color)) return;
+  $("profile-color").value = color;
+  $("profile-color-hex").value = color.toLowerCase();
+  $("profile-color-preview").style.background = color;
+}
+
+function openProfile() {
+  const draft = draftRead("profile", {});
+  const displayName = draft.display_name || state.user.display_name || "";
+  const color = draft.color || state.user.color || DEFAULT_COLOR;
+  $("profile-display-name").value = displayName;
+  $("profile-color").value = color;
+  $("profile-color-hex").value = color;
+  $("profile-color-preview").style.background = color;
+  $("profile-display-name").oninput = () => draftWrite("profile", { display_name: $("profile-display-name").value, color: $("profile-color").value });
+  $("profile-color").oninput = () => {
+    syncProfileColorInputs("color");
+    draftWrite("profile", { display_name: $("profile-display-name").value, color: $("profile-color").value });
+  };
+  $("profile-color-hex").oninput = () => {
+    syncProfileColorInputs("hex");
+    draftWrite("profile", { display_name: $("profile-display-name").value, color: $("profile-color").value });
+  };
+  $("profile-save").onclick = async (event) => {
+    event.preventDefault();
+    try {
+      state.user = await api("/api/me", {
+        method: "PATCH",
+        body: JSON.stringify({
+          display_name: $("profile-display-name").value,
+          color: $("profile-color").value,
+        }),
+      });
+      cacheWrite("me", state.user);
+      draftRemove("profile");
+      showApp();
+      $("profile-dialog").close();
+      await loadRoute();
+      toast("Profile saved");
+    } catch (err) { toast(err.message); }
+  };
+  $("profile-dialog").showModal();
 }
 
 $("auth-toggle").onclick = () => { state.authMode = state.authMode === "login" ? "signup" : "login"; updateAuthMode(); };
@@ -720,6 +904,7 @@ $("auth-form").onsubmit = async (event) => {
       return;
     }
     state.user = await api("/api/me");
+    cacheWrite("me", state.user);
     showApp();
     try {
       await loadRoute();
@@ -729,8 +914,12 @@ $("auth-form").onsubmit = async (event) => {
   } catch (err) { toast(err.message); }
 };
 $("logout").onclick = async () => { await api("/api/auth/logout", { method: "POST" }); state.user = null; showAuth(); };
+$("profile-open").onclick = openProfile;
 $("new-dope").onclick = openNewDope;
 $("search").oninput = render;
+$("search").onkeydown = (event) => {
+  if (event.key === "Enter") event.preventDefault();
+};
 $("filter-open").onclick = () => {
   $("filter-min").value = state.filters.min;
   $("filter-max").value = state.filters.max;
@@ -738,6 +927,14 @@ $("filter-open").onclick = () => {
   $("filter-completed-by").value = state.filters.completedBy;
   $("filter-from").value = state.filters.from;
   $("filter-to").value = state.filters.to;
+  bindDraftFields("filters", [
+    ["min", "filter-min"],
+    ["max", "filter-max"],
+    ["depsDoped", "filter-deps-doped"],
+    ["completedBy", "filter-completed-by"],
+    ["from", "filter-from"],
+    ["to", "filter-to"],
+  ]);
   $("filter-dialog").showModal();
 };
 $("filter-apply").onclick = (event) => {
@@ -751,11 +948,13 @@ $("filter-apply").onclick = (event) => {
     to: $("filter-to").value,
   };
   $("filter-dialog").close();
+  draftWrite("filters", state.filters);
   render();
 };
 $("filter-reset").onclick = (event) => {
   event.preventDefault();
   state.filters = { min: "", max: "", depsDoped: false, completedBy: "", from: "", to: "" };
+  draftRemove("filters");
   $("filter-dialog").close();
   render();
 };
@@ -781,4 +980,7 @@ window.addEventListener("hashchange", async () => {
     toast(err.message || "Could not load dopes");
   }
 });
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/static/sw.js").catch(() => {});
+}
 init();
