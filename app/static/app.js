@@ -626,6 +626,26 @@ async function openDope(id) {
       </div>
     </section>
   ` : "";
+  const sortedDependents = [...(d.dependents || [])].sort((a, b) => {
+    if ((a.depth || 1) !== (b.depth || 1)) return (a.depth || 1) - (b.depth || 1);
+    return a.title.localeCompare(b.title);
+  });
+  const dependentCount = sortedDependents.length;
+  const dependents = dependentCount ? `
+    <section class="dependency-links-wrap">
+      <h2>Dependents</h2>
+      <button id="dependent-summary" class="dependency-summary" value="default">
+        <span>${dependentCount} ${dependentCount === 1 ? "dependent" : "dependents"}</span>
+        <i class="ph ph-caret-down"></i>
+      </button>
+      <div id="dependent-links" class="dependency-links" hidden>
+        ${sortedDependents.map((dep) => `<button class="dependency-link ${dep.depth > 1 ? "is-indirect" : ""}" data-dependent-open="${dep.id}" value="default">
+          <span>${escapeHtml(dep.title)}</span>
+          <small>${dep.depth > 1 ? "Chain" : "Direct"} - ${formatMinutes(dep.time_minutes)}</small>
+        </button>`).join("")}
+      </div>
+    </section>
+  ` : "";
   $("modal-body").innerHTML = `
     <div id="modal-topbar" class="modal-topbar"><strong>${escapeHtml(d.title)}</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
     <div class="modal-content">
@@ -643,6 +663,7 @@ async function openDope(id) {
       ${editCount ? `<label id="version-picker-wrap" class="version-picker" hidden>Read version<select id="version-picker">${versionOptions}</select></label>` : ""}
       <h2 id="dope-version-title">${escapeHtml(activeVersion.title)}</h2>
       ${dependencies}
+      ${dependents}
       <div id="dope-version-description" class="description">${sanitizeHtml(activeVersion.description_html)}</div>
       ${completionNotes}
       ${history}
@@ -662,6 +683,12 @@ async function openDope(id) {
       openDope(Number(el.dataset.dependencyOpen));
     };
   });
+  document.querySelectorAll("[data-dependent-open]").forEach((el) => {
+    el.onclick = (event) => {
+      event.preventDefault();
+      openDope(Number(el.dataset.dependentOpen));
+    };
+  });
   const dependencySummary = $("dependency-summary");
   const dependencyLinks = $("dependency-links");
   if (dependencySummary && dependencyLinks) {
@@ -669,6 +696,15 @@ async function openDope(id) {
       event.preventDefault();
       dependencyLinks.hidden = !dependencyLinks.hidden;
       dependencySummary.classList.toggle("is-open", !dependencyLinks.hidden);
+    };
+  }
+  const dependentSummary = $("dependent-summary");
+  const dependentLinks = $("dependent-links");
+  if (dependentSummary && dependentLinks) {
+    dependentSummary.onclick = (event) => {
+      event.preventDefault();
+      dependentLinks.hidden = !dependentLinks.hidden;
+      dependentSummary.classList.toggle("is-open", !dependentLinks.hidden);
     };
   }
   bindDopeActions(d);

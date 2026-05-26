@@ -137,4 +137,6 @@ def test_dependent_count_includes_transitive_children(tmp_path, monkeypatch):
         payload = client.get("/api/dopes?status=active").json()
     by_title = {item["title"]: item for item in payload}
     assert by_title["C"]["dependent_count"] == 2
+    assert [item["title"] for item in by_title["C"]["dependents"]] == ["B", "A"]
+    assert [item["depth"] for item in by_title["C"]["dependents"]] == [1, 2]
     assert by_title["B"]["dependent_count"] == 1

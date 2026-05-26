@@ -387,6 +387,10 @@ def set_dope_dependencies(conn: sqlite3.Connection, dope_id: int, dependency_ids
 
 
 def active_dependent_count(conn: sqlite3.Connection, dope_id: int) -> int:
+    return len(active_dependent_rows(conn, dope_id))
+
+
+def active_dependent_rows(conn: sqlite3.Connection, dope_id: int) -> list[dict[str, Any]]:
     edges = conn.execute(
         """
         SELECT dd.dope_id, dd.depends_on_id
@@ -401,14 +405,40 @@ def active_dependent_count(conn: sqlite3.Connection, dope_id: int) -> int:
         reverse_graph.setdefault(edge["depends_on_id"], []).append(edge["dope_id"])
 
     dependents: set[int] = set()
-    stack = list(reverse_graph.get(dope_id, []))
+    depths: dict[int, int] = {}
+    stack = [(child_id, 1) for child_id in reverse_graph.get(dope_id, [])]
     while stack:
-        current = stack.pop()
+        current, depth = stack.pop()
         if current in dependents:
             continue
         dependents.add(current)
-        stack.extend(reverse_graph.get(current, []))
-    return len(dependents)
+        depths[current] = depth
+        stack.extend((child_id, depth + 1) for child_id in reverse_graph.get(current, []))
+    if not dependents:
+        return []
+
+    placeholders = ",".join("?" for _ in dependents)
+    rows = conn.execute(
+        f"""
+        SELECT id, title, time_minutes, assigned_to, completed_at, archived_at
+        FROM dopes
+        WHERE id IN ({placeholders})
+        """,
+        tuple(dependents),
+    ).fetchall()
+    return sorted(
+        [
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "time_minutes": row["time_minutes"],
+                "status": "archived" if row["archived_at"] else "completed" if row["completed_at"] else "active",
+                "depth": depths.get(row["id"], 1),
+            }
+            for row in rows
+        ],
+        key=lambda item: (item["depth"], item["title"].lower(), item["id"]),
+    )
 
 
 def incomplete_dependency_rows(conn: sqlite3.Connection, dope_id: int) -> list[sqlite3.Row]:
@@ -460,7 +490,8 @@ def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection) -> dict[str, Any]:
         """,
         (row["id"],),
     ).fetchall()
-    dependent_count = active_dependent_count(conn, row["id"])
+    dependents = active_dependent_rows(conn, row["id"])
+    dependent_count = len(dependents)
     blocked_dependencies = [dep for dep in dependencies if dep["completed_at"] is None]
     return {
         "id": row["id"],
@@ -499,6 +530,7 @@ def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection) -> dict[str, Any]:
             for dep in blocked_dependencies
         ],
         "dependent_count": dependent_count,
+        "dependents": dependents,
         "versions": [
             {
                 "id": v["id"],
