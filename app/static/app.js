@@ -895,16 +895,17 @@ function renderApiKeys(keys = []) {
         <strong>${escapeHtml(key.name)}</strong>
         <small>${escapeHtml(key.prefix)}... · created ${localDate(key.created_at)}${key.last_used_at ? ` · used ${localDate(key.last_used_at)}` : ""}${key.revoked_at ? " · revoked" : ""}</small>
       </span>
-      ${key.revoked_at ? "" : `<button class="danger" type="button" data-api-key-revoke="${key.id}"><i class="ph ph-trash"></i>Revoke</button>`}
+      ${key.revoked_at ? "" : `<button class="danger" type="button" data-api-key-revoke="${key.id}"><i class="ph ph-trash"></i>Delete key</button>`}
     </div>
   `).join("") : `<p class="empty mini">No API keys yet.</p>`;
   list.innerHTML = rows;
   document.querySelectorAll("[data-api-key-revoke]").forEach((button) => {
     button.onclick = async (event) => {
       event.preventDefault();
+      if (!confirm("Delete this API key? Anything using it will stop working.")) return;
       await api(`/api/me/keys/${button.dataset.apiKeyRevoke}`, { method: "DELETE" });
       await loadApiKeys();
-      toast("API key revoked");
+      toast("API key deleted");
     };
   });
 }

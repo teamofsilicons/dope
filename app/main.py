@@ -657,8 +657,8 @@ def list_api_keys(user_cookie: str | None = Cookie(default=None, alias=COOKIE_NA
             """
             SELECT id, name, prefix, created_at, last_used_at, revoked_at
             FROM api_keys
-            WHERE user_id = ?
-            ORDER BY revoked_at IS NOT NULL, created_at DESC
+            WHERE user_id = ? AND revoked_at IS NULL
+            ORDER BY created_at DESC
             """,
             (user["id"],),
         ).fetchall()

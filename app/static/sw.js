@@ -1,8 +1,8 @@
-const CACHE_NAME = "dope-shell-20260618-apikey1";
+const CACHE_NAME = "dope-shell-20260618-apikey2";
 const SHELL_ASSETS = [
   "/",
-  "/static/app.css?v=20260618-apikey1",
-  "/static/app.js?v=20260618-apikey1",
+  "/static/app.css?v=20260618-apikey2",
+  "/static/app.js?v=20260618-apikey2",
   "/static/si-logo-light.png",
 ];
 
