@@ -142,6 +142,68 @@ def test_dependent_count_includes_transitive_children(tmp_path, monkeypatch):
     assert by_title["B"]["dependent_count"] == 1
 
 
+def test_categories_seeded_and_manageable(tmp_path, monkeypatch):
+    main = load_main(tmp_path, monkeypatch)
+
+    with TestClient(main.app) as client:
+        client.post(
+            "/api/auth/signup",
+            json={"username": "shubham", "password": "password", "display_name": "Shubham"},
+        )
+        client.post("/api/auth/login", json={"username": "shubham", "password": "password"})
+
+        seeded = client.get("/api/categories").json()
+        assert [c["name"] for c in seeded] == [
+            "Silicon Centered",
+            "Silicon Supporting",
+            "Client Side",
+            "Team",
+        ]
+        centered = seeded[0]
+        assert centered["color"] == "#2e6f8e"
+
+        created = client.post("/api/categories", json={"name": "Research", "color": "#b23a70"})
+        assert created.status_code == 200
+        new_id = created.json()["id"]
+
+        # Duplicate names are rejected
+        assert client.post("/api/categories", json={"name": "research", "color": "#000000"}).status_code == 409
+
+        renamed = client.patch(f"/api/categories/{new_id}", json={"name": "Discovery", "color": "#4f68b1"})
+        assert renamed.status_code == 200
+        assert renamed.json()["name"] == "Discovery"
+
+        # Create a dope in the category, then deleting the category should null it out
+        dope = client.post(
+            "/api/dopes",
+            json={
+                "title": "Categorized",
+                "description_html": "<p>Body</p>",
+                "time_text": "30min",
+                "dependency_ids": [],
+                "category_id": new_id,
+            },
+        ).json()
+        assert dope["category"]["name"] == "Discovery"
+
+        assert client.delete(f"/api/categories/{new_id}").status_code == 200
+        refreshed = client.get("/api/dopes?status=active").json()
+        assert refreshed[0]["category"] is None
+
+        # Unknown category is rejected on create
+        bad = client.post(
+            "/api/dopes",
+            json={
+                "title": "Bad",
+                "description_html": "<p>x</p>",
+                "time_text": "30min",
+                "dependency_ids": [],
+                "category_id": 99999,
+            },
+        )
+        assert bad.status_code == 400
+
+
 def test_api_key_can_manage_dopes(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 

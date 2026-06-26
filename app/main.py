@@ -139,6 +139,14 @@ def init_db() -> None:
               last_used_at TEXT,
               revoked_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS categories (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+              color TEXT NOT NULL,
+              position INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL
+            );
             """
         )
         conn.execute(
@@ -163,6 +171,24 @@ def init_db() -> None:
         }
         if "color" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN color TEXT NOT NULL DEFAULT '#1a1a1a'")
+        dope_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(dopes)").fetchall()
+        }
+        if "category_id" not in dope_columns:
+            conn.execute("ALTER TABLE dopes ADD COLUMN category_id INTEGER REFERENCES categories(id)")
+        if not conn.execute("SELECT 1 FROM categories LIMIT 1").fetchone():
+            seed_categories = [
+                ("Silicon Centered", "#2e6f8e"),
+                ("Silicon Supporting", "#5a9a6b"),
+                ("Client Side", "#c56f2d"),
+                ("Team", "#7a4d8e"),
+            ]
+            seeded_at = now_iso()
+            conn.executemany(
+                "INSERT INTO categories (name, color, position, created_at) VALUES (?, ?, ?, ?)",
+                [(name, color, index, seeded_at) for index, (name, color) in enumerate(seed_categories)],
+            )
 
 
 @app.on_event("startup")
@@ -261,12 +287,14 @@ class DopeIn(BaseModel):
     description_html: str = Field(min_length=1, max_length=250_000)
     time_text: str = Field(min_length=1, max_length=40)
     dependency_ids: list[int] = Field(default_factory=list, max_length=50)
+    category_id: int | None = Field(default=None)
 
 
 class DopeEditIn(BaseModel):
     title: str = Field(min_length=1, max_length=180)
     description_html: str = Field(min_length=1, max_length=250_000)
     dependency_ids: list[int] = Field(default_factory=list, max_length=50)
+    category_id: int | None = Field(default=None)
 
 
 class UnassignIn(BaseModel):
@@ -286,6 +314,11 @@ class ProfileIn(BaseModel):
 
 class ApiKeyIn(BaseModel):
     name: str = Field(default="API key", min_length=1, max_length=80)
+
+
+class CategoryIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
 
 
 def parse_time_to_minutes(value: str) -> int:
@@ -334,6 +367,21 @@ def normalize_color(value: str | None, fallback: str = "#1a1a1a") -> str:
     if value and re.match(r"^#[0-9a-fA-F]{6}$", value):
         return value.lower()
     return fallback
+
+
+def category_public(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {"id": row["id"], "name": row["name"], "color": row["color"]}
+
+
+def validate_category_id(conn: sqlite3.Connection, category_id: int | None) -> int | None:
+    if category_id is None:
+        return None
+    row = conn.execute("SELECT id FROM categories WHERE id = ?", (category_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=400, detail="Category not found")
+    return category_id
 
 
 def add_dope_version(
@@ -526,9 +574,15 @@ def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection) -> dict[str, Any]:
     dependents = active_dependent_rows(conn, row["id"])
     dependent_count = len(dependents)
     blocked_dependencies = [dep for dep in dependencies if dep["completed_at"] is None]
+    category = category_public(
+        conn.execute(
+            "SELECT id, name, color FROM categories WHERE id = ?", (row["category_id"],)
+        ).fetchone()
+    ) if row["category_id"] else None
     return {
         "id": row["id"],
         "title": row["title"],
+        "category": category,
         "description_html": row["description_html"],
         "time_minutes": row["time_minutes"],
         "created_at": row["created_at"],
@@ -693,6 +747,84 @@ def revoke_api_key(key_id: int, user_cookie: str | None = Cookie(default=None, a
     return {"ok": True}
 
 
+@app.get("/api/categories")
+def list_categories(
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    current_user(user_cookie, authorization)
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id, name, color FROM categories ORDER BY position, id"
+        ).fetchall()
+    return [category_public(row) for row in rows]  # type: ignore[misc]
+
+
+@app.post("/api/categories")
+def create_category(
+    data: CategoryIn,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    current_user(user_cookie, authorization)
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Category name is required")
+    color = normalize_color(data.color)
+    with db() as conn:
+        position = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM categories").fetchone()[0]
+        try:
+            cur = conn.execute(
+                "INSERT INTO categories (name, color, position, created_at) VALUES (?, ?, ?, ?)",
+                (name, color, position, now_iso()),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=409, detail="Category name already exists") from None
+        row = conn.execute("SELECT id, name, color FROM categories WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return category_public(row)  # type: ignore[return-value]
+
+
+@app.patch("/api/categories/{category_id}")
+def update_category(
+    category_id: int,
+    data: CategoryIn,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    current_user(user_cookie, authorization)
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Category name is required")
+    color = normalize_color(data.color)
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM categories WHERE id = ?", (category_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="Category not found")
+        try:
+            conn.execute(
+                "UPDATE categories SET name = ?, color = ? WHERE id = ?",
+                (name, color, category_id),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=409, detail="Category name already exists") from None
+        row = conn.execute("SELECT id, name, color FROM categories WHERE id = ?", (category_id,)).fetchone()
+    return category_public(row)  # type: ignore[return-value]
+
+
+@app.delete("/api/categories/{category_id}")
+def delete_category(
+    category_id: int,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    current_user(user_cookie, authorization)
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM categories WHERE id = ?", (category_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="Category not found")
+        conn.execute("UPDATE dopes SET category_id = NULL WHERE category_id = ?", (category_id,))
+        conn.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+    return {"ok": True}
+
+
 @app.get("/api/dopes")
 def list_dopes(
     status: str = "active",
@@ -850,12 +982,13 @@ def create_dope(
     user = current_user(user_cookie, authorization)
     minutes = parse_time_to_minutes(data.time_text)
     with db() as conn:
+        category_id = validate_category_id(conn, data.category_id)
         cur = conn.execute(
             """
-            INSERT INTO dopes (title, description_html, time_minutes, created_by, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO dopes (title, description_html, time_minutes, created_by, created_at, category_id)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (data.title.strip(), data.description_html, minutes, user["id"], now_iso()),
+            (data.title.strip(), data.description_html, minutes, user["id"], now_iso(), category_id),
         )
         dope_id = int(cur.lastrowid)
         set_dope_dependencies(conn, dope_id, data.dependency_ids)
@@ -878,12 +1011,15 @@ def edit_dope(
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or row["archived_at"]:
             raise HTTPException(status_code=404, detail="Editable dope not found")
+        category_id = validate_category_id(conn, data.category_id)
         if row["title"] != title or row["description_html"] != data.description_html:
             conn.execute(
                 "UPDATE dopes SET title = ?, description_html = ? WHERE id = ?",
                 (title, data.description_html, dope_id),
             )
             add_dope_version(conn, dope_id, title, data.description_html, user["id"], edited_at)
+        if row["category_id"] != category_id:
+            conn.execute("UPDATE dopes SET category_id = ? WHERE id = ?", (category_id, dope_id))
         set_dope_dependencies(conn, dope_id, data.dependency_ids)
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn)
 

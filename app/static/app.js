@@ -3,12 +3,15 @@ const state = {
   route: "active",
   dopes: [],
   allDopes: [],
+  categories: [],
   progress: [],
   progressDays: 7,
-  filters: { min: "", max: "", depsDoped: false, completedBy: "", from: "", to: "" },
+  filters: { categoryIds: [], min: "", max: "", createdFrom: "", createdTo: "", depsDoped: false, completedBy: "", from: "", to: "" },
   authMode: "login",
   booted: false,
 };
+
+const DEFAULT_FILTERS = { categoryIds: [], min: "", max: "", createdFrom: "", createdTo: "", depsDoped: false, completedBy: "", from: "", to: "" };
 
 const $ = (id) => document.getElementById(id);
 const CACHE_PREFIX = "dope-cache:";
@@ -180,6 +183,7 @@ function updateAuthMode() {
 async function init() {
   updateAuthMode();
   state.filters = { ...state.filters, ...draftRead("filters", {}) };
+  state.categories = cacheRead("categories", []) || [];
   try {
     state.user = await api("/api/me");
     cacheWrite("me", state.user);
@@ -200,6 +204,7 @@ async function init() {
     return;
   }
   showApp(true);
+  loadCategories(true).then(render).catch(() => {});
   try {
     await loadRoute();
   } catch (err) {
@@ -271,6 +276,27 @@ async function ensureAllDopes(force = false) {
   return state.allDopes;
 }
 
+async function loadCategories(force = false) {
+  if (!force && state.categories.length) return state.categories;
+  const cached = cacheRead("categories");
+  if (!force && cached) {
+    state.categories = cached;
+    return state.categories;
+  }
+  try {
+    state.categories = await api("/api/categories");
+    cacheWrite("categories", state.categories);
+  } catch {
+    if (cached) state.categories = cached;
+  }
+  return state.categories;
+}
+
+function categoryById(id) {
+  if (id == null) return null;
+  return state.categories.find((c) => c.id === Number(id)) || null;
+}
+
 function searchableText(d) {
   const div = document.createElement("div");
   div.innerHTML = d.description_html || "";
@@ -290,10 +316,17 @@ function filteredDopes() {
     });
     items = fuse.search(query).map((r) => r.item);
   }
+  const categoryIds = (state.filters.categoryIds || []).map(Number);
+  if (categoryIds.length) {
+    const wantUncategorized = categoryIds.includes(0);
+    items = items.filter((d) => (d.category ? categoryIds.includes(d.category.id) : wantUncategorized));
+  }
   const min = minutesFromText(state.filters.min);
   const max = minutesFromText(state.filters.max);
   if (min) items = items.filter((d) => d.time_minutes >= min);
   if (max) items = items.filter((d) => d.time_minutes <= max);
+  if (state.filters.createdFrom) items = items.filter((d) => d.created_at?.slice(0, 10) >= state.filters.createdFrom);
+  if (state.filters.createdTo) items = items.filter((d) => d.created_at?.slice(0, 10) <= state.filters.createdTo);
   if (state.filters.depsDoped) items = items.filter((d) => (d.blocked_dependencies || []).length === 0);
   if (state.route === "completed") {
     const by = state.filters.completedBy.trim().toLowerCase();
@@ -305,7 +338,14 @@ function filteredDopes() {
 }
 
 function filtersActive() {
-  const baseActive = Boolean(state.filters.min || state.filters.max || state.filters.depsDoped);
+  const baseActive = Boolean(
+    (state.filters.categoryIds || []).length ||
+    state.filters.min ||
+    state.filters.max ||
+    state.filters.createdFrom ||
+    state.filters.createdTo ||
+    state.filters.depsDoped
+  );
   if (state.route !== "completed") return baseActive;
   return baseActive || Boolean(state.filters.completedBy || state.filters.from || state.filters.to);
 }
@@ -397,13 +437,25 @@ function card(d) {
     d.status === "archived" ? `Archived ${localDate(d.archived_at)}` :
     d.assigned_to ? `Claimed by ${escapeHtml(d.assigned_to.display_name)}` : "";
   const blocked = d.status === "active" && (d.blocked_dependencies || []).length > 0;
-  return `<button class="dope-card ${blocked ? "is-blocked" : ""}" data-dope="${d.id}">
-    <span><h3>${escapeHtml(d.title)}</h3>${status ? `<span class="meta"><span>${status}</span></span>` : ""}</span>
+  const cat = d.category;
+  const accent = cat ? ` style="--accent:${escapeHtml(cat.color)}"` : "";
+  return `<button class="dope-card ${blocked ? "is-blocked" : ""} ${cat ? "has-accent" : ""}" data-dope="${d.id}"${accent}>
+    <span class="card-main">
+      <h3>${escapeHtml(d.title)}</h3>
+      <span class="card-tags">
+        ${cat ? categoryPill(cat) : ""}
+        ${status ? `<span class="meta"><span>${status}</span></span>` : ""}
+      </span>
+    </span>
     <span class="card-pills">
       ${d.dependent_count ? `<span class="pill"><i class="ph ph-tree-structure"></i>${d.dependent_count} ${d.dependent_count === 1 ? "dependent" : "dependents"}</span>` : ""}
       <span class="pill"><i class="ph ph-clock"></i>${formatMinutes(d.time_minutes)}</span>
     </span>
   </button>`;
+}
+
+function categoryPill(cat) {
+  return `<span class="category-pill" style="--accent:${escapeHtml(cat.color)}"><span class="category-dot"></span>${escapeHtml(cat.name)}</span>`;
 }
 
 function escapeHtml(value) {
@@ -437,6 +489,42 @@ function assignmentHistoryLine(d, h) {
   const endLabel = endedByCompletion ? "completed" : "unassigned";
   const reason = !endedByCompletion && h.unassign_reason ? ` because, and i quote "${escapeHtml(h.unassign_reason)}"` : "";
   return `${escapeHtml(h.display_name)} started this on ${fullDate(h.assigned_at)}${h.unassigned_at ? ` and ${endLabel} on ${fullDate(h.unassigned_at)}${reason}` : ""}`;
+}
+
+function categoryPickerHtml(selectedId = null) {
+  const selected = selectedId == null ? null : Number(selectedId);
+  const chips = state.categories.map((cat) => `
+    <button type="button" class="category-choice ${selected === cat.id ? "is-selected" : ""}" data-category-choice="${cat.id}" style="--accent:${escapeHtml(cat.color)}">
+      <span class="category-dot"></span>${escapeHtml(cat.name)}
+    </button>
+  `).join("");
+  const none = `<button type="button" class="category-choice category-choice-none ${selected == null ? "is-selected" : ""}" data-category-choice="">None</button>`;
+  return `
+    <div class="field-label">Category</div>
+    <div id="category-picker" class="category-choices" data-selected="${selected == null ? "" : selected}">
+      ${none}${chips}
+      ${state.categories.length ? "" : `<span class="category-empty-hint">No categories yet — add some from the tag icon in the navbar.</span>`}
+    </div>
+  `;
+}
+
+function bindCategoryPicker() {
+  const picker = $("category-picker");
+  if (!picker) return;
+  picker.querySelectorAll("[data-category-choice]").forEach((button) => {
+    button.onclick = (event) => {
+      event.preventDefault();
+      picker.dataset.selected = button.dataset.categoryChoice;
+      picker.querySelectorAll("[data-category-choice]").forEach((b) => b.classList.toggle("is-selected", b === button));
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+  });
+}
+
+function selectedCategoryId() {
+  const picker = $("category-picker");
+  if (!picker || !picker.dataset.selected) return null;
+  return Number(picker.dataset.selected);
 }
 
 function dependencyPickerHtml(selectedIds = [], excludeId = null) {
@@ -496,6 +584,7 @@ function bindDraftFields(key, fields) {
       if (!el) return;
       if (kind === "html") draft[name] = el.innerHTML;
       else if (kind === "checked-list") draft[name] = selectedDependencyIds();
+      else if (kind === "category") draft[name] = el.dataset.selected ? Number(el.dataset.selected) : null;
       else if (el.type === "checkbox") draft[name] = el.checked;
       else draft[name] = el.value;
     });
@@ -504,7 +593,7 @@ function bindDraftFields(key, fields) {
   fields.forEach(([, id, kind = "value"]) => {
     const el = $(id);
     if (!el) return;
-    const eventName = kind === "checked-list" ? "change" : "input";
+    const eventName = kind === "checked-list" || kind === "category" ? "change" : "input";
     el.addEventListener(eventName, save);
   });
   document.querySelectorAll("[data-dependency-option]").forEach((input) => input.addEventListener("change", save));
@@ -520,7 +609,7 @@ function preventSearchSubmit(root = document) {
 }
 
 async function openNewDope() {
-  await ensureAllDopes(true);
+  await Promise.all([ensureAllDopes(true), loadCategories()]);
   const draftKey = "new-dope";
   const draft = draftRead(draftKey);
   $("modal-title").hidden = true;
@@ -531,17 +620,20 @@ async function openNewDope() {
       <label>Title<input id="new-title" name="dope_new_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" placeholder="Improve onboarding empty state" value="${escapeHtml(draft.title || "")}"></label>
       <label>Description<div id="new-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(draft.description_html || "")}</div></label>
       <label>Time to complete<input id="new-time" name="dope_new_time" autocomplete="off" placeholder="2hr, 30min, 0.5hr" value="${escapeHtml(draft.time_text || "")}"></label>
+      ${categoryPickerHtml(draft.category_id ?? null)}
       ${dependencyPickerHtml(draft.dependency_ids || [])}
     </div>
     <div class="modal-action-bar"><button id="create-dope" class="primary-wide" value="default">Create Dope</button></div>
   `;
   wireEditor($("new-description"));
+  bindCategoryPicker();
   bindDependencyPicker(Boolean((draft.dependency_ids || []).length));
   preventSearchSubmit($("modal-body"));
   bindDraftFields(draftKey, [
     ["title", "new-title"],
     ["description_html", "new-description", "html"],
     ["time_text", "new-time"],
+    ["category_id", "category-picker", "category"],
     ["dependency_ids", "dependency-panel", "checked-list"],
   ]);
   $("create-dope").onclick = async (event) => {
@@ -553,6 +645,7 @@ async function openNewDope() {
           title: $("new-title").value,
           description_html: sanitizeHtml($("new-description").innerHTML),
           time_text: $("new-time").value,
+          category_id: selectedCategoryId(),
           dependency_ids: selectedDependencyIds(),
         }),
       });
@@ -652,6 +745,7 @@ async function openDope(id) {
       <div id="modal-title-sentinel"></div>
       <div class="modal-headline">
         <div>
+          ${d.category ? categoryPill(d.category) : ""}
           <span class="pill"><i class="ph ph-clock"></i>${formatMinutes(d.time_minutes)}</span>
           ${d.assigned_to ? `<span class="pill"><i class="ph ph-user"></i>${escapeHtml(d.assigned_to.display_name)}</span>` : ""}
           ${d.completed_by ? `<span class="pill"><i class="ph ph-check-circle"></i>${escapeHtml(d.completed_by.display_name)} on ${localDate(d.completed_at)}</span>` : ""}
@@ -801,10 +895,11 @@ function bindModalChrome(title) {
 }
 
 async function openEditDope(d) {
-  await ensureAllDopes(true);
+  await Promise.all([ensureAllDopes(true), loadCategories()]);
   const draftKey = `edit-dope:${d.id}`;
   const draft = draftRead(draftKey);
   const selectedDeps = draft.dependency_ids || (d.dependencies || []).map((dep) => dep.id);
+  const selectedCategory = draft.category_id !== undefined ? draft.category_id : (d.category ? d.category.id : null);
   $("modal-title").hidden = true;
   $("modal-title").textContent = "Edit Dope";
   $("modal-body").innerHTML = `
@@ -812,6 +907,7 @@ async function openEditDope(d) {
     <div class="modal-content">
       <label>Title<input id="edit-title" name="dope_edit_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" value="${escapeHtml(draft.title || d.title)}"></label>
       <label>Description<div id="edit-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(draft.description_html || d.description_html)}</div></label>
+      ${categoryPickerHtml(selectedCategory)}
       ${dependencyPickerHtml(selectedDeps, d.id)}
     </div>
     <div class="modal-action-bar">
@@ -819,11 +915,13 @@ async function openEditDope(d) {
     </div>
   `;
   wireEditor($("edit-description"));
+  bindCategoryPicker();
   bindDependencyPicker(selectedDeps.length > 0);
   preventSearchSubmit($("modal-body"));
   bindDraftFields(draftKey, [
     ["title", "edit-title"],
     ["description_html", "edit-description", "html"],
+    ["category_id", "category-picker", "category"],
     ["dependency_ids", "dependency-panel", "checked-list"],
   ]);
   $("save-edit").onclick = async (event) => {
@@ -834,6 +932,7 @@ async function openEditDope(d) {
         body: JSON.stringify({
           title: $("edit-title").value,
           description_html: sanitizeHtml($("edit-description").innerHTML),
+          category_id: selectedCategoryId(),
           dependency_ids: selectedDependencyIds(),
         }),
       });
@@ -992,6 +1091,108 @@ function openProfile() {
   $("profile-dialog").showModal();
 }
 
+function renderFilterCategories() {
+  const host = $("filter-categories");
+  if (!host) return;
+  const selected = new Set((state.filters.categoryIds || []).map(Number));
+  const chips = state.categories.map((cat) => `
+    <button type="button" class="category-choice ${selected.has(cat.id) ? "is-selected" : ""}" data-filter-category="${cat.id}" style="--accent:${escapeHtml(cat.color)}">
+      <span class="category-dot"></span>${escapeHtml(cat.name)}
+    </button>
+  `).join("");
+  const none = `<button type="button" class="category-choice category-choice-none ${selected.has(0) ? "is-selected" : ""}" data-filter-category="0">Uncategorized</button>`;
+  host.innerHTML = `${chips}${none}`;
+  host.querySelectorAll("[data-filter-category]").forEach((button) => {
+    button.onclick = (event) => {
+      event.preventDefault();
+      button.classList.toggle("is-selected");
+    };
+  });
+}
+
+function selectedFilterCategoryIds() {
+  return [...document.querySelectorAll("#filter-categories [data-filter-category].is-selected")].map((b) => Number(b.dataset.filterCategory));
+}
+
+function categoryManageRow(cat) {
+  return `
+    <div class="category-manage-row" data-category-row="${cat.id}">
+      <input class="category-row-color" type="color" value="${escapeHtml(cat.color)}" data-category-color-input="${cat.id}" aria-label="Color for ${escapeHtml(cat.name)}">
+      <input class="category-row-name" value="${escapeHtml(cat.name)}" maxlength="60" data-category-name-input="${cat.id}" aria-label="Name for ${escapeHtml(cat.name)}">
+      <button type="button" class="secondary category-row-save" data-category-save="${cat.id}" title="Save"><i class="ph ph-check"></i></button>
+      <button type="button" class="danger category-row-delete" data-category-delete="${cat.id}" title="Delete"><i class="ph ph-trash"></i></button>
+    </div>
+  `;
+}
+
+function renderCategoryManageList() {
+  const list = $("category-list");
+  if (!list) return;
+  list.innerHTML = state.categories.length
+    ? state.categories.map(categoryManageRow).join("")
+    : `<p class="empty mini">No categories yet. Add your first below.</p>`;
+  list.querySelectorAll("[data-category-save]").forEach((button) => {
+    button.onclick = async (event) => {
+      event.preventDefault();
+      const id = button.dataset.categorySave;
+      const name = list.querySelector(`[data-category-name-input="${id}"]`).value.trim();
+      const color = list.querySelector(`[data-category-color-input="${id}"]`).value;
+      if (!name) { toast("Category name is required"); return; }
+      try {
+        await api(`/api/categories/${id}`, { method: "PATCH", body: JSON.stringify({ name, color }) });
+        await refreshCategories();
+        toast("Category saved");
+      } catch (err) { toast(err.message); }
+    };
+  });
+  list.querySelectorAll("[data-category-delete]").forEach((button) => {
+    button.onclick = async (event) => {
+      event.preventDefault();
+      const id = button.dataset.categoryDelete;
+      const cat = categoryById(id);
+      if (!confirm(`Delete "${cat ? cat.name : "this category"}"? Dopes in it will become uncategorized.`)) return;
+      try {
+        await api(`/api/categories/${id}`, { method: "DELETE" });
+        await refreshCategories();
+        toast("Category deleted");
+      } catch (err) { toast(err.message); }
+    };
+  });
+}
+
+async function refreshCategories() {
+  await loadCategories(true);
+  renderCategoryManageList();
+  render();
+}
+
+function openCategories() {
+  renderCategoryManageList();
+  loadCategories(true).then(renderCategoryManageList).catch(() => {});
+  const colorInput = $("category-new-color");
+  $("category-new-name").value = "";
+  document.querySelectorAll("[data-category-color]").forEach((button) => {
+    button.classList.toggle("is-selected", button.dataset.categoryColor === colorInput.value);
+    button.onclick = (event) => {
+      event.preventDefault();
+      colorInput.value = button.dataset.categoryColor;
+      document.querySelectorAll("[data-category-color]").forEach((b) => b.classList.toggle("is-selected", b === button));
+    };
+  });
+  $("category-add").onclick = async (event) => {
+    event.preventDefault();
+    const name = $("category-new-name").value.trim();
+    if (!name) { toast("Category name is required"); return; }
+    try {
+      await api("/api/categories", { method: "POST", body: JSON.stringify({ name, color: colorInput.value }) });
+      $("category-new-name").value = "";
+      await refreshCategories();
+      toast("Category added");
+    } catch (err) { toast(err.message); }
+  };
+  $("categories-dialog").showModal();
+}
+
 $("auth-toggle").onclick = () => { state.authMode = state.authMode === "login" ? "signup" : "login"; updateAuthMode(); };
 $("auth-form").onsubmit = async (event) => {
   event.preventDefault();
@@ -1013,6 +1214,7 @@ $("auth-form").onsubmit = async (event) => {
     state.user = await api("/api/me");
     cacheWrite("me", state.user);
     showApp();
+    loadCategories(true).then(render).catch(() => {});
     try {
       await loadRoute();
     } catch (err) {
@@ -1027,28 +1229,27 @@ $("search").oninput = render;
 $("search").onkeydown = (event) => {
   if (event.key === "Enter") event.preventDefault();
 };
-$("filter-open").onclick = () => {
+$("filter-open").onclick = async () => {
+  await loadCategories();
+  renderFilterCategories();
   $("filter-min").value = state.filters.min;
   $("filter-max").value = state.filters.max;
+  $("filter-created-from").value = state.filters.createdFrom;
+  $("filter-created-to").value = state.filters.createdTo;
   $("filter-deps-doped").checked = state.filters.depsDoped;
   $("filter-completed-by").value = state.filters.completedBy;
   $("filter-from").value = state.filters.from;
   $("filter-to").value = state.filters.to;
-  bindDraftFields("filters", [
-    ["min", "filter-min"],
-    ["max", "filter-max"],
-    ["depsDoped", "filter-deps-doped"],
-    ["completedBy", "filter-completed-by"],
-    ["from", "filter-from"],
-    ["to", "filter-to"],
-  ]);
   $("filter-dialog").showModal();
 };
 $("filter-apply").onclick = (event) => {
   event.preventDefault();
   state.filters = {
+    categoryIds: selectedFilterCategoryIds(),
     min: $("filter-min").value,
     max: $("filter-max").value,
+    createdFrom: $("filter-created-from").value,
+    createdTo: $("filter-created-to").value,
     depsDoped: $("filter-deps-doped").checked,
     completedBy: $("filter-completed-by").value,
     from: $("filter-from").value,
@@ -1060,11 +1261,13 @@ $("filter-apply").onclick = (event) => {
 };
 $("filter-reset").onclick = (event) => {
   event.preventDefault();
-  state.filters = { min: "", max: "", depsDoped: false, completedBy: "", from: "", to: "" };
+  state.filters = { ...DEFAULT_FILTERS, categoryIds: [] };
   draftRemove("filters");
   $("filter-dialog").close();
+  renderFilterCategories();
   render();
 };
+$("categories-open").onclick = openCategories;
 document.querySelectorAll("[data-progress-days]").forEach((button) => {
   button.onclick = async () => {
     state.progressDays = Number(button.dataset.progressDays);

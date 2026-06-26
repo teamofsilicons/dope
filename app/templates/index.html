@@ -5,15 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ede8e0">
   <title>Dopes</title>
-  <link rel="icon" type="image/png" href="/static/si-logo-light.png?v=20260618-apikey2">
-  <link rel="apple-touch-icon" href="/static/si-logo-light.png?v=20260618-apikey2">
+  <link rel="icon" type="image/png" href="/static/si-logo-light.png?v=20260626-cats">
+  <link rel="apple-touch-icon" href="/static/si-logo-light.png?v=20260626-cats">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2/src/regular/style.css">
-  <link rel="stylesheet" href="/static/app.css?v=20260618-apikey2">
+  <link rel="stylesheet" href="/static/app.css?v=20260626-cats">
   <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
-  <script src="/static/app.js?v=20260618-apikey2" defer></script>
+  <script src="/static/app.js?v=20260626-cats" defer></script>
 </head>
 <body>
   <div id="toast" class="toast" hidden></div>
@@ -57,6 +57,7 @@
         <a href="#archived" data-route="archived">Archived</a>
       </nav>
       <div class="user-chip">
+        <button id="categories-open" title="Manage categories"><i class="ph ph-tag"></i></button>
         <button id="profile-open" class="profile-chip" title="Profile"><span id="user-color-dot"></span><span id="user-name"></span></button>
         <button id="logout" title="Sign out"><i class="ph ph-sign-out"></i></button>
       </div>
@@ -114,21 +115,67 @@
     <form method="dialog" class="modal small">
       <button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button>
       <h2>Filters</h2>
-      <div class="grid-two">
-        <label>Min time<input id="filter-min" name="dope_filter_min_time" autocomplete="off" placeholder="30min"></label>
-        <label>Max time<input id="filter-max" name="dope_filter_max_time" autocomplete="off" placeholder="5hr"></label>
+      <div class="filter-group">
+        <span class="filter-label">Category</span>
+        <div id="filter-categories" class="category-filter-chips"></div>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Time to complete</span>
+        <div class="grid-two">
+          <label>Min time<input id="filter-min" name="dope_filter_min_time" autocomplete="off" placeholder="30min"></label>
+          <label>Max time<input id="filter-max" name="dope_filter_max_time" autocomplete="off" placeholder="5hr"></label>
+        </div>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Created date</span>
+        <div class="grid-two">
+          <label>From<input id="filter-created-from" type="date"></label>
+          <label>To<input id="filter-created-to" type="date"></label>
+        </div>
       </div>
       <label class="filter-check"><input id="filter-deps-doped" type="checkbox">All Dependencies Doped</label>
       <div id="completed-filters">
-        <label>Completed by<input id="filter-completed-by" name="dope_filter_completed_by" autocomplete="off" placeholder="Name"></label>
-        <div class="grid-two">
-          <label>From<input id="filter-from" type="date"></label>
-          <label>To<input id="filter-to" type="date"></label>
+        <div class="filter-group">
+          <span class="filter-label">Completed</span>
+          <label>Completed by<input id="filter-completed-by" name="dope_filter_completed_by" autocomplete="off" placeholder="Name"></label>
+          <div class="grid-two">
+            <label>From<input id="filter-from" type="date"></label>
+            <label>To<input id="filter-to" type="date"></label>
+          </div>
         </div>
       </div>
       <div class="modal-actions">
         <button id="filter-apply" value="default">Apply filters</button>
         <button id="filter-reset" class="secondary" value="default">Reset filters</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="categories-dialog">
+    <form method="dialog" class="modal small categories-modal">
+      <button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button>
+      <h2>Categories</h2>
+      <p class="muted categories-intro">Group your dopes by category. Each category carries a color used across cards and filters.</p>
+      <div id="category-list" class="category-manage-list"></div>
+      <div class="category-create">
+        <span class="filter-label">New category</span>
+        <div class="category-create-row">
+          <input id="category-new-name" autocomplete="off" placeholder="Category name" maxlength="60">
+          <input id="category-new-color" type="color" aria-label="Category color" value="#2e6f8e">
+        </div>
+        <div class="color-presets" aria-label="Preset colors">
+          <button type="button" data-category-color="#2e6f8e" style="--swatch:#2e6f8e"></button>
+          <button type="button" data-category-color="#5a9a6b" style="--swatch:#5a9a6b"></button>
+          <button type="button" data-category-color="#c56f2d" style="--swatch:#c56f2d"></button>
+          <button type="button" data-category-color="#7a4d8e" style="--swatch:#7a4d8e"></button>
+          <button type="button" data-category-color="#b23a70" style="--swatch:#b23a70"></button>
+          <button type="button" data-category-color="#2f8f83" style="--swatch:#2f8f83"></button>
+          <button type="button" data-category-color="#4f68b1" style="--swatch:#4f68b1"></button>
+          <button type="button" data-category-color="#9a4d42" style="--swatch:#9a4d42"></button>
+          <button type="button" data-category-color="#ffbb00" style="--swatch:#ffbb00"></button>
+          <button type="button" data-category-color="#1a1a1a" style="--swatch:#1a1a1a"></button>
+        </div>
+        <button id="category-add" class="primary-wide" type="button" value="default"><i class="ph ph-plus"></i>Add category</button>
       </div>
     </form>
   </dialog>
