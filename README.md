@@ -17,3 +17,15 @@ Open `http://127.0.0.1:8000`.
 
 - `DOPE_DB_PATH`: optional SQLite path. Defaults to `./dope.db`.
 - `DOPE_SECRET_KEY`: optional cookie signing secret. Set this in production.
+
+## Deploy
+
+The app runs as a systemd service behind nginx (see `deploy/`). To ship the
+latest `main` onto the server, run on the box:
+
+```bash
+sudo /srv/dope/deploy/deploy.sh
+```
+
+It fetches `main`, syncs dependencies, restarts the `dope` service, and runs a
+smoke check. DB migrations run automatically on startup.
