@@ -49,8 +49,19 @@ curl -s -H "Authorization: Bearer $DOPE_KEY" \
 
 ## Deploy
 
-The app runs as a systemd service behind nginx (see `deploy/`). To ship the
-latest `main` onto the server, run on the box:
+The app runs as a systemd service behind nginx (see `deploy/`). To ship from
+your laptop in one command:
+
+```bash
+./deploy/ship.sh
+```
+
+It pushes `main`, runs the server-side deploy over SSH, and verifies the
+deployed commit matches local. It expects the server key at `~/.ssh/dope.pem`
+(or `~/Downloads/dope.pem`); override with `DOPE_SSH_KEY`, `DOPE_SSH_HOST`,
+or `DOPE_SSH_USER` if your setup differs.
+
+Alternatively, run the server-side script directly on the box:
 
 ```bash
 sudo /srv/dope/deploy/deploy.sh
