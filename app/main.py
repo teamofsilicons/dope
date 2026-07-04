@@ -1411,6 +1411,162 @@ def delete_comment(
     return {"ok": True}
 
 
+@app.get("/api/diagnostics")
+def diagnostics(
+    limit: int = 50,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    current_user(user_cookie, authorization)
+    limit = max(1, min(limit, 200))
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+    with db() as conn:
+        users = conn.execute("SELECT * FROM users ORDER BY display_name COLLATE NOCASE, id").fetchall()
+        active_rows = conn.execute(
+            """
+            SELECT d.id, d.time_minutes, d.assigned_to, d.category_id,
+              EXISTS(
+                SELECT 1 FROM dope_dependencies dd
+                JOIN dopes p ON p.id = dd.depends_on_id
+                WHERE dd.dope_id = d.id AND p.completed_at IS NULL
+              ) AS blocked
+            FROM dopes d
+            WHERE d.archived_at IS NULL AND d.completed_at IS NULL
+            """
+        ).fetchall()
+        completed_rows = conn.execute(
+            """
+            SELECT completed_by, time_minutes, completed_at
+            FROM dopes WHERE archived_at IS NULL AND completed_at IS NOT NULL
+            """
+        ).fetchall()
+        archived_count = conn.execute("SELECT COUNT(*) FROM dopes WHERE archived_at IS NOT NULL").fetchone()[0]
+        created_counts = dict(conn.execute("SELECT created_by, COUNT(*) FROM dopes GROUP BY created_by").fetchall())
+        comment_counts = dict(conn.execute("SELECT user_id, COUNT(*) FROM comments GROUP BY user_id").fetchall())
+        categories = {row["id"]: row for row in conn.execute("SELECT id, name, color FROM categories").fetchall()}
+
+        totals = {
+            "total": len(active_rows) + len(completed_rows) + int(archived_count),
+            "active": len(active_rows),
+            "completed": len(completed_rows),
+            "archived": int(archived_count),
+            "active_minutes": sum(r["time_minutes"] for r in active_rows),
+            "completed_minutes": sum(r["time_minutes"] for r in completed_rows),
+            "blocked": sum(1 for r in active_rows if r["blocked"]),
+            "blocked_minutes": sum(r["time_minutes"] for r in active_rows if r["blocked"]),
+            "in_progress": sum(1 for r in active_rows if r["assigned_to"]),
+            "in_progress_minutes": sum(r["time_minutes"] for r in active_rows if r["assigned_to"]),
+            "ready": sum(1 for r in active_rows if not r["blocked"] and not r["assigned_to"]),
+            "ready_minutes": sum(r["time_minutes"] for r in active_rows if not r["blocked"] and not r["assigned_to"]),
+        }
+
+        by_category: dict[int | None, dict[str, Any]] = {}
+        for row in active_rows:
+            bucket = by_category.setdefault(
+                row["category_id"],
+                {"category": category_public(categories.get(row["category_id"])), "count": 0, "minutes": 0},
+            )
+            bucket["count"] += 1
+            bucket["minutes"] += row["time_minutes"]
+        remaining_by_category = sorted(by_category.values(), key=lambda b: -b["minutes"])
+
+        per_person = []
+        for u in users:
+            stats = {
+                "user": user_public(u),
+                "online": is_online(u["last_seen_at"]),
+                "last_seen_at": u["last_seen_at"],
+                "completed_count": 0,
+                "completed_minutes": 0,
+                "completed_7d_count": 0,
+                "completed_7d_minutes": 0,
+                "in_progress_count": 0,
+                "in_progress_minutes": 0,
+                "created_count": int(created_counts.get(u["id"], 0)),
+                "comments_count": int(comment_counts.get(u["id"], 0)),
+            }
+            per_person.append(stats)
+        by_user = {p["user"]["id"]: p for p in per_person}
+        for row in completed_rows:
+            stats = by_user.get(row["completed_by"])
+            if not stats:
+                continue
+            stats["completed_count"] += 1
+            stats["completed_minutes"] += row["time_minutes"]
+            if row["completed_at"] >= week_ago:
+                stats["completed_7d_count"] += 1
+                stats["completed_7d_minutes"] += row["time_minutes"]
+        for row in active_rows:
+            stats = by_user.get(row["assigned_to"])
+            if stats:
+                stats["in_progress_count"] += 1
+                stats["in_progress_minutes"] += row["time_minutes"]
+        per_person.sort(key=lambda p: (-p["completed_minutes"], p["user"]["display_name"].lower()))
+
+        def event(kind: str, at: str, user_row: sqlite3.Row | dict[str, Any] | None, dope_id: int, title: str, detail: str | None = None) -> dict[str, Any]:
+            user = user_row if isinstance(user_row, dict) or user_row is None else user_public(user_row)
+            return {"type": kind, "at": at, "user": user, "dope_id": dope_id, "dope_title": title, "detail": detail}
+
+        events: list[dict[str, Any]] = []
+        for row in conn.execute(
+            "SELECT d.id, d.title, d.created_at AS at, u.id AS uid, u.username, u.display_name, u.color "
+            "FROM dopes d JOIN users u ON u.id = d.created_by ORDER BY d.created_at DESC LIMIT ?",
+            (limit,),
+        ):
+            events.append(event("created", row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["id"], row["title"]))
+        for row in conn.execute(
+            "SELECT d.id, d.title, d.completed_at AS at, u.id AS uid, u.username, u.display_name, u.color "
+            "FROM dopes d JOIN users u ON u.id = d.completed_by WHERE d.completed_at IS NOT NULL "
+            "ORDER BY d.completed_at DESC LIMIT ?",
+            (limit,),
+        ):
+            events.append(event("completed", row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["id"], row["title"]))
+        for row in conn.execute(
+            "SELECT d.id, d.title, d.archived_at AS at, u.id AS uid, u.username, u.display_name, u.color "
+            "FROM dopes d JOIN users u ON u.id = d.archived_by WHERE d.archived_at IS NOT NULL "
+            "ORDER BY d.archived_at DESC LIMIT ?",
+            (limit,),
+        ):
+            events.append(event("archived", row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["id"], row["title"]))
+        for row in conn.execute(
+            "SELECT h.dope_id, h.assigned_at, h.unassigned_at, h.unassign_reason, d.title, "
+            "u.id AS uid, u.username, u.display_name, u.color "
+            "FROM assignment_history h JOIN dopes d ON d.id = h.dope_id JOIN users u ON u.id = h.user_id "
+            "ORDER BY h.assigned_at DESC LIMIT ?",
+            (limit,),
+        ):
+            actor = {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}
+            events.append(event("assigned", row["assigned_at"], actor, row["dope_id"], row["title"]))
+            # Completion auto-closes open history rows without a reason; only
+            # explicit unassigns (which require a reason) are real events.
+            if row["unassigned_at"] and row["unassign_reason"]:
+                events.append(event("unassigned", row["unassigned_at"], actor, row["dope_id"], row["title"], row["unassign_reason"]))
+        for row in conn.execute(
+            "SELECT c.dope_id, c.body, c.created_at AS at, d.title, u.id AS uid, u.username, u.display_name, u.color "
+            "FROM comments c JOIN dopes d ON d.id = c.dope_id JOIN users u ON u.id = c.user_id "
+            "ORDER BY c.created_at DESC LIMIT ?",
+            (limit,),
+        ):
+            snippet = row["body"] if len(row["body"]) <= 120 else row["body"][:117] + "..."
+            events.append(event("commented", row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["dope_id"], row["title"], snippet))
+        for row in conn.execute(
+            "SELECT v.dope_id, v.edited_at AS at, d.title, u.id AS uid, u.username, u.display_name, u.color "
+            "FROM dope_versions v JOIN dopes d ON d.id = v.dope_id JOIN users u ON u.id = v.edited_by "
+            "WHERE v.version_number > 1 ORDER BY v.edited_at DESC LIMIT ?",
+            (limit,),
+        ):
+            events.append(event("edited", row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["dope_id"], row["title"]))
+
+        events.sort(key=lambda e: e["at"], reverse=True)
+        return {
+            "generated_at": now_iso(),
+            "totals": totals,
+            "remaining_by_category": remaining_by_category,
+            "per_person": per_person,
+            "activity": events[:limit],
+        }
+
+
 @app.post("/api/dopes/{dope_id}/comments/read")
 def read_comments(
     dope_id: int,

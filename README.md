@@ -40,6 +40,19 @@ Dope payloads from `GET /api/dopes` include `comment_count`,
 `unread_comments`, `unread_mentions`, and `latest_comment_at` for the caller,
 which power the new-message badges.
 
+### Diagnostics
+
+- `GET /api/diagnostics?limit=50` — team-wide overview (also in the UI via
+  the pulse icon, top right):
+  - `totals` — active/completed/archived counts and minutes, plus how much
+    is remaining split into `ready`, `in_progress`, and `blocked`.
+  - `remaining_by_category` — open work grouped by category.
+  - `per_person` — per member: completed (all-time and last 7 days),
+    in-progress load, dopes created, comments posted, online status.
+  - `activity` — newest-first feed of everything that happened: created,
+    assigned, unassigned (with reason), completed, archived, edited,
+    commented. `limit` caps the feed (max 200).
+
 ```bash
 curl -s -H "Authorization: Bearer $DOPE_KEY" \
   -H "Content-Type: application/json" \

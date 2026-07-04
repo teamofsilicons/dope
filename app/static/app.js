@@ -1472,6 +1472,94 @@ function openCategories() {
   $("categories-dialog").showModal();
 }
 
+const ACTIVITY_META = {
+  created: { icon: "ph-plus-circle", verb: "created" },
+  assigned: { icon: "ph-target", verb: "started" },
+  unassigned: { icon: "ph-user-minus", verb: "stepped away from" },
+  completed: { icon: "ph-confetti", verb: "doped" },
+  archived: { icon: "ph-archive", verb: "archived" },
+  commented: { icon: "ph-chat-circle", verb: "commented on" },
+  edited: { icon: "ph-pencil-simple", verb: "edited" },
+};
+
+function diagStatTile(label, value, sub) {
+  return `<div class="diag-tile"><strong>${escapeHtml(String(value))}</strong><span>${escapeHtml(label)}</span><small>${escapeHtml(sub || "")}</small></div>`;
+}
+
+function diagPersonRow(p) {
+  return `<div class="diag-person">
+    <span class="diag-person-name">
+      <span class="online-dot ${p.online ? "is-online" : ""}" title="${p.online ? "Online" : "Offline"}"></span>
+      <span class="diag-color-dot" style="background:${escapeHtml(p.user.color || DEFAULT_COLOR)}"></span>
+      <strong>${escapeHtml(p.user.display_name)}</strong>
+    </span>
+    <span class="diag-cell"><small>Doped</small>${p.completed_count} · ${formatMinutes(p.completed_minutes || 0)}</span>
+    <span class="diag-cell"><small>Last 7d</small>${p.completed_7d_count} · ${formatMinutes(p.completed_7d_minutes || 0)}</span>
+    <span class="diag-cell"><small>In progress</small>${p.in_progress_count} · ${formatMinutes(p.in_progress_minutes || 0)}</span>
+    <span class="diag-cell"><small>Created</small>${p.created_count}</span>
+    <span class="diag-cell"><small>Comments</small>${p.comments_count}</span>
+  </div>`;
+}
+
+function diagActivityRow(e) {
+  const meta = ACTIVITY_META[e.type] || { icon: "ph-dot", verb: e.type };
+  const detail = e.detail ? `<small class="diag-activity-detail">${e.type === "commented" ? `"${escapeHtml(e.detail)}"` : escapeHtml(e.detail)}</small>` : "";
+  return `<li class="diag-activity-row" data-diag-dope="${e.dope_id}">
+    <i class="ph ${meta.icon}"></i>
+    <span>
+      <span><strong>${escapeHtml(e.user?.display_name || "someone")}</strong> ${meta.verb} <strong>${escapeHtml(e.dope_title)}</strong></span>
+      ${detail}
+      <small class="diag-activity-time">${fullDate(e.at)}</small>
+    </span>
+  </li>`;
+}
+
+function renderDiagnostics(d) {
+  const t = d.totals;
+  const categoryChips = d.remaining_by_category.map((b) => {
+    const cat = b.category;
+    const label = cat ? categoryPill(cat) : `<span class="category-pill" style="--accent:#8b8b8b"><span class="category-dot"></span>Uncategorized</span>`;
+    return `<span class="diag-cat-chip">${label}<small>${b.count} · ${formatMinutes(b.minutes)}</small></span>`;
+  }).join("");
+  $("diagnostics-body").innerHTML = `
+    <section class="diag-section">
+      <h3>Remaining</h3>
+      <div class="diag-tiles">
+        ${diagStatTile("remaining", formatMinutes(t.active_minutes || 0), `${t.active} active ${t.active === 1 ? "dope" : "dopes"}`)}
+        ${diagStatTile("ready to pick", t.ready, formatMinutes(t.ready_minutes || 0))}
+        ${diagStatTile("in progress", t.in_progress, formatMinutes(t.in_progress_minutes || 0))}
+        ${diagStatTile("blocked", t.blocked, formatMinutes(t.blocked_minutes || 0))}
+        ${diagStatTile("doped", t.completed, `${formatMinutes(t.completed_minutes || 0)} shipped`)}
+      </div>
+      ${categoryChips ? `<div class="diag-cats">${categoryChips}</div>` : ""}
+    </section>
+    <section class="diag-section">
+      <h3>Progress per person</h3>
+      <div class="diag-people">${d.per_person.map(diagPersonRow).join("") || `<p class="empty mini">No members yet.</p>`}</div>
+    </section>
+    <section class="diag-section">
+      <h3>What happened</h3>
+      <ul class="diag-activity">${d.activity.map(diagActivityRow).join("") || `<p class="empty mini">Nothing yet.</p>`}</ul>
+    </section>
+  `;
+  document.querySelectorAll("[data-diag-dope]").forEach((el) => {
+    el.onclick = () => {
+      $("diagnostics-dialog").close();
+      openDope(Number(el.dataset.diagDope));
+    };
+  });
+}
+
+async function openDiagnostics() {
+  $("diagnostics-body").innerHTML = `<p class="empty mini">Loading diagnostics…</p>`;
+  $("diagnostics-dialog").showModal();
+  try {
+    renderDiagnostics(await api("/api/diagnostics"));
+  } catch (err) {
+    $("diagnostics-body").innerHTML = `<p class="empty mini">${escapeHtml(err.message || "Could not load diagnostics")}</p>`;
+  }
+}
+
 $("auth-toggle").onclick = () => { state.authMode = state.authMode === "login" ? "signup" : "login"; updateAuthMode(); };
 $("auth-form").onsubmit = async (event) => {
   event.preventDefault();
@@ -1547,6 +1635,7 @@ $("filter-reset").onclick = (event) => {
   render();
 };
 $("categories-open").onclick = openCategories;
+$("diagnostics-open").onclick = openDiagnostics;
 document.querySelectorAll("[data-progress-days]").forEach((button) => {
   button.onclick = async () => {
     state.progressDays = Number(button.dataset.progressDays);

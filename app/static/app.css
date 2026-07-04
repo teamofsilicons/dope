@@ -273,6 +273,35 @@ dialog::backdrop { background: rgba(26,26,26,0.42); backdrop-filter: blur(4px); 
 .online-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); flex: 0 0 auto; }
 .online-dot.is-online { background: var(--green); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green) 25%, transparent); }
 
+#diagnostics-dialog { width: min(calc(100% - 24px), 720px); }
+#diagnostics-dialog .modal { padding: clamp(20px, 5vw, 32px); }
+.diagnostics-modal h2 { margin: 0 0 18px; }
+.diag-section { margin-bottom: 26px; }
+.diag-section:last-child { margin-bottom: 0; }
+.diag-section h3 { margin: 0 0 10px; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; font-family: var(--font-mono); color: var(--fg-dim); }
+.diag-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
+.diag-tile { border: 1px solid var(--border); background: var(--bg-3); padding: 12px; display: grid; gap: 2px; }
+.diag-tile strong { font-size: 22px; letter-spacing: -0.03em; line-height: 1.1; }
+.diag-tile span { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-dim); }
+.diag-tile small { color: var(--fg-muted); font-size: 11px; }
+.diag-cats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.diag-cat-chip { display: inline-flex; align-items: center; gap: 7px; }
+.diag-cat-chip small { color: var(--fg-muted); font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+.diag-people { display: grid; gap: 7px; }
+.diag-person { display: grid; grid-template-columns: minmax(120px, 1.4fr) repeat(5, minmax(0, 1fr)); gap: 8px; align-items: center; border: 1px solid var(--border); background: var(--bg-3); padding: 10px 12px; }
+.diag-person-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.diag-person-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.diag-color-dot { width: 10px; height: 10px; border: 1px solid var(--fg); flex: 0 0 auto; }
+.diag-cell { display: grid; gap: 1px; font-family: var(--font-mono); font-size: 11px; color: var(--fg); white-space: nowrap; }
+.diag-cell small { font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-dim); }
+.diag-activity { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; max-height: 340px; overflow: auto; }
+.diag-activity-row { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 9px; align-items: start; border: 1px solid var(--border-soft); background: var(--bg-3); padding: 9px 11px; cursor: pointer; }
+.diag-activity-row:hover { border-color: var(--fg); }
+.diag-activity-row i { color: var(--fg-muted); font-size: 15px; margin-top: 1px; }
+.diag-activity-row > span { display: grid; gap: 2px; font-size: 13px; line-height: 1.45; min-width: 0; }
+.diag-activity-detail { color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diag-activity-time { color: var(--fg-dim); font-family: var(--font-mono); font-size: 10px; }
+
 .filter-group { margin-bottom: 18px; }
 .filter-group .grid-two { margin: 0; }
 .filter-group .grid-two label, #completed-filters label { margin-bottom: 12px; }
@@ -315,6 +344,8 @@ dialog::backdrop { background: rgba(26,26,26,0.42); backdrop-filter: blur(4px); 
   .card-pills { justify-content: flex-start; }
   .grid-two { grid-template-columns: 1fr; }
   .api-key-create, .api-key-row { grid-template-columns: 1fr; }
+  .diag-person { grid-template-columns: 1fr 1fr; }
+  .diag-person-name { grid-column: 1 / -1; }
   .modal-headline { flex-direction: column; }
   .modal-action-bar { justify-content: stretch; flex-wrap: wrap; }
   .action-text, .primary-wide { flex: 1 1 auto; }

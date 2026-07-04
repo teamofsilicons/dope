@@ -11,9 +11,9 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2/src/regular/style.css">
-  <link rel="stylesheet" href="/static/app.css?v=20260704-comments">
+  <link rel="stylesheet" href="/static/app.css?v=20260704-diag">
   <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
-  <script src="/static/app.js?v=20260704-comments" defer></script>
+  <script src="/static/app.js?v=20260704-diag" defer></script>
 </head>
 <body>
   <div id="toast" class="toast" hidden></div>
@@ -57,6 +57,7 @@
         <a href="#archived" data-route="archived">Archived</a>
       </nav>
       <div class="user-chip">
+        <button id="diagnostics-open" title="Diagnostics"><i class="ph ph-pulse"></i></button>
         <button id="categories-open" title="Manage categories"><i class="ph ph-tag"></i></button>
         <button id="profile-open" class="profile-chip" title="Profile"><span id="user-color-dot"></span><span id="user-name"></span></button>
         <button id="logout" title="Sign out"><i class="ph ph-sign-out"></i></button>
@@ -177,6 +178,14 @@
         </div>
         <button id="category-add" class="primary-wide" type="button" value="default"><i class="ph ph-plus"></i>Add category</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog id="diagnostics-dialog">
+    <form method="dialog" class="modal diagnostics-modal">
+      <button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button>
+      <h2>Diagnostics</h2>
+      <div id="diagnostics-body"><p class="empty mini">Loading diagnostics…</p></div>
     </form>
   </dialog>
 
