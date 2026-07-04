@@ -11,6 +11,9 @@ const state = {
   booted: false,
   users: [],
   usersFetchedAt: 0,
+  diag: null,
+  diagWindow: "7d",
+  diagTimer: null,
 };
 
 const DEFAULT_FILTERS = { categoryIds: [], min: "", max: "", createdFrom: "", createdTo: "", depsDoped: false, completedBy: "", from: "", to: "" };
@@ -222,7 +225,17 @@ async function loadRoute() {
   if (state.booted) setRouteLoading(true);
   try {
     state.route = location.hash.replace("#", "") || "active";
-    if (!["active", "completed", "archived"].includes(state.route)) state.route = "active";
+    if (!["active", "completed", "archived", "diagnostics"].includes(state.route)) state.route = "active";
+    const isDiagnostics = state.route === "diagnostics";
+    $("board-shell").hidden = isDiagnostics;
+    $("diagnostics-page").hidden = !isDiagnostics;
+    $("diagnostics-open").classList.toggle("is-current", isDiagnostics);
+    document.querySelectorAll(".nav-links a").forEach((a) => a.classList.toggle("active", !isDiagnostics && a.dataset.route === state.route));
+    if (isDiagnostics) {
+      await loadDiagnostics();
+      return;
+    }
+    clearInterval(state.diagTimer);
     const isActive = state.route === "active";
     document.querySelectorAll(".nav-links a").forEach((a) => a.classList.toggle("active", a.dataset.route === state.route));
     $("page-title").textContent = isActive ? "Active Dopes" : state.route === "completed" ? "Completed Dopes" : "Archived Dopes";
@@ -1482,82 +1495,260 @@ const ACTIVITY_META = {
   edited: { icon: "ph-pencil-simple", verb: "edited" },
 };
 
-function diagStatTile(label, value, sub) {
-  return `<div class="diag-tile"><strong>${escapeHtml(String(value))}</strong><span>${escapeHtml(label)}</span><small>${escapeHtml(sub || "")}</small></div>`;
+// Chart-safe status trio: same hues as the app tokens, chroma-corrected so the
+// marks pass the contrast + colorblind checks on the paper surface.
+const DIAG_STATUS = [
+  { key: "ready", label: "Ready to pick", color: "#2e8b57" },
+  { key: "in_progress", label: "In progress", color: "#2a6f9e" },
+  { key: "blocked", label: "Blocked", color: "#9a4d42" },
+];
+
+const DIAG_WINDOWS = [
+  { key: "7d", label: "7d", count: "completed_7d_count", minutes: "completed_7d_minutes" },
+  { key: "30d", label: "30d", count: "completed_30d_count", minutes: "completed_30d_minutes" },
+  { key: "all", label: "All time", count: "completed_count", minutes: "completed_minutes" },
+];
+
+function timeAgo(iso) {
+  if (!iso) return "";
+  const seconds = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  if (seconds < 7 * 86400) return `${Math.floor(seconds / 86400)}d ago`;
+  return localDate(iso);
 }
 
-function diagPersonRow(p) {
-  return `<div class="diag-person">
-    <span class="diag-person-name">
-      <span class="online-dot ${p.online ? "is-online" : ""}" title="${p.online ? "Online" : "Offline"}"></span>
-      <span class="diag-color-dot" style="background:${escapeHtml(p.user.color || DEFAULT_COLOR)}"></span>
-      <strong>${escapeHtml(p.user.display_name)}</strong>
-    </span>
-    <span class="diag-cell"><small>Doped</small>${p.completed_count} · ${formatMinutes(p.completed_minutes || 0)}</span>
-    <span class="diag-cell"><small>Last 7d</small>${p.completed_7d_count} · ${formatMinutes(p.completed_7d_minutes || 0)}</span>
-    <span class="diag-cell"><small>In progress</small>${p.in_progress_count} · ${formatMinutes(p.in_progress_minutes || 0)}</span>
-    <span class="diag-cell"><small>Created</small>${p.created_count}</span>
-    <span class="diag-cell"><small>Comments</small>${p.comments_count}</span>
-  </div>`;
+function diagDayLabel(iso) {
+  const day = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date(today.getTime() - 86400000);
+  const same = (a, b) => a.toDateString() === b.toDateString();
+  if (same(day, today)) return "Today";
+  if (same(day, yesterday)) return "Yesterday";
+  return day.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
-function diagActivityRow(e) {
-  const meta = ACTIVITY_META[e.type] || { icon: "ph-dot", verb: e.type };
-  const detail = e.detail ? `<small class="diag-activity-detail">${e.type === "commented" ? `"${escapeHtml(e.detail)}"` : escapeHtml(e.detail)}</small>` : "";
-  return `<li class="diag-activity-row" data-diag-dope="${e.dope_id}">
-    <i class="ph ${meta.icon}"></i>
-    <span>
-      <span><strong>${escapeHtml(e.user?.display_name || "someone")}</strong> ${meta.verb} <strong>${escapeHtml(e.dope_title)}</strong></span>
-      ${detail}
-      <small class="diag-activity-time">${fullDate(e.at)}</small>
-    </span>
-  </li>`;
-}
-
-function renderDiagnostics(d) {
-  const t = d.totals;
-  const categoryChips = d.remaining_by_category.map((b) => {
-    const cat = b.category;
-    const label = cat ? categoryPill(cat) : `<span class="category-pill" style="--accent:#8b8b8b"><span class="category-dot"></span>Uncategorized</span>`;
-    return `<span class="diag-cat-chip">${label}<small>${b.count} · ${formatMinutes(b.minutes)}</small></span>`;
+function diagHeroHtml(t) {
+  const deltaMinutes = (t.completed_7d_minutes || 0) - (t.completed_prev7d_minutes || 0);
+  const deltaDir = deltaMinutes > 0 ? "up" : deltaMinutes < 0 ? "down" : "flat";
+  const delta = deltaMinutes === 0
+    ? `<span class="diag-delta is-flat">— level with last week</span>`
+    : `<span class="diag-delta is-${deltaDir}"><i class="ph ${deltaDir === "up" ? "ph-arrow-up-right" : "ph-arrow-down-right"}"></i>${formatMinutes(Math.abs(deltaMinutes))} vs prior week</span>`;
+  const total = Math.max(1, t.active_minutes || 0);
+  const segments = DIAG_STATUS.map((s) => {
+    const minutes = t[`${s.key}_minutes`] || 0;
+    const count = t[s.key] || 0;
+    if (!minutes && !count) return "";
+    const width = Math.max(1.5, (minutes / total) * 100);
+    const tip = `${s.label}\n${count} ${count === 1 ? "dope" : "dopes"}\n${formatMinutes(minutes)}`;
+    return `<span class="diag-seg" style="width:${width}%;background:${s.color}" data-progress-tip="${escapeHtml(tip)}" aria-label="${escapeHtml(tip)}"></span>`;
   }).join("");
-  $("diagnostics-body").innerHTML = `
-    <section class="diag-section">
-      <h3>Remaining</h3>
-      <div class="diag-tiles">
-        ${diagStatTile("remaining", formatMinutes(t.active_minutes || 0), `${t.active} active ${t.active === 1 ? "dope" : "dopes"}`)}
-        ${diagStatTile("ready to pick", t.ready, formatMinutes(t.ready_minutes || 0))}
-        ${diagStatTile("in progress", t.in_progress, formatMinutes(t.in_progress_minutes || 0))}
-        ${diagStatTile("blocked", t.blocked, formatMinutes(t.blocked_minutes || 0))}
-        ${diagStatTile("doped", t.completed, `${formatMinutes(t.completed_minutes || 0)} shipped`)}
+  const legend = DIAG_STATUS.map((s) => `
+    <span class="diag-legend-item">
+      <span class="diag-key" style="background:${s.color}"></span>
+      <span class="diag-legend-label">${s.label}</span>
+      <strong>${t[s.key] || 0}</strong>
+      <small>${formatMinutes(t[`${s.key}_minutes`] || 0)}</small>
+    </span>
+  `).join("");
+  return `
+    <section class="diag-card diag-hero-card">
+      <div class="diag-hero-row">
+        <div class="diag-hero-main">
+          <span class="diag-card-label">Remaining</span>
+          <span class="diag-hero-value">${escapeHtml(formatMinutes(t.active_minutes || 0))}</span>
+          <span class="diag-hero-sub">across ${t.active} active ${t.active === 1 ? "dope" : "dopes"}</span>
+        </div>
+        <div class="diag-hero-aside">
+          <div class="diag-mini-stat">
+            <span class="diag-card-label">Doped this week</span>
+            <strong>${escapeHtml(formatMinutes(t.completed_7d_minutes || 0))}</strong>
+            ${delta}
+          </div>
+          <div class="diag-mini-stat">
+            <span class="diag-card-label">Doped all time</span>
+            <strong>${escapeHtml(formatMinutes(t.completed_minutes || 0))}</strong>
+            <span class="diag-delta is-flat">${t.completed} ${t.completed === 1 ? "dope" : "dopes"} shipped</span>
+          </div>
+        </div>
       </div>
-      ${categoryChips ? `<div class="diag-cats">${categoryChips}</div>` : ""}
-    </section>
-    <section class="diag-section">
-      <h3>Progress per person</h3>
-      <div class="diag-people">${d.per_person.map(diagPersonRow).join("") || `<p class="empty mini">No members yet.</p>`}</div>
-    </section>
-    <section class="diag-section">
-      <h3>What happened</h3>
-      <ul class="diag-activity">${d.activity.map(diagActivityRow).join("") || `<p class="empty mini">Nothing yet.</p>`}</ul>
+      ${t.active ? `
+        <div class="diag-split-track" role="img" aria-label="Remaining work split by status">${segments}</div>
+        <div class="diag-legend">${legend}</div>
+      ` : `<p class="empty mini">Nothing in the queue — every dope is doped.</p>`}
     </section>
   `;
+}
+
+function diagCategoriesHtml(buckets, totalMinutes) {
+  if (!buckets.length) return "";
+  const max = Math.max(1, ...buckets.map((b) => b.minutes));
+  const rows = buckets.map((b) => {
+    const color = b.category ? b.category.color : "#8b8b8b";
+    const name = b.category ? b.category.name : "Uncategorized";
+    const share = totalMinutes ? Math.round((b.minutes / totalMinutes) * 100) : 0;
+    const width = Math.max(1.5, (b.minutes / max) * 100);
+    const tip = `${name}\n${b.count} ${b.count === 1 ? "dope" : "dopes"}\n${formatMinutes(b.minutes)} · ${share}%`;
+    return `
+      <div class="diag-bar-row">
+        <span class="diag-bar-label" title="${escapeHtml(name)}"><span class="diag-key" style="background:${escapeHtml(color)}"></span>${escapeHtml(name)}</span>
+        <span class="diag-bar-track"><span class="diag-bar" style="width:${width}%;background:${escapeHtml(color)}" data-progress-tip="${escapeHtml(tip)}"></span></span>
+        <span class="diag-bar-value">${b.count} · ${formatMinutes(b.minutes)}</span>
+      </div>
+    `;
+  }).join("");
+  return `
+    <section class="diag-card">
+      <div class="diag-card-head">
+        <span class="diag-card-label">Remaining by category</span>
+        <small>${formatMinutes(totalMinutes)} open</small>
+      </div>
+      <div class="diag-bars">${rows}</div>
+    </section>
+  `;
+}
+
+function diagPeopleHtml(people) {
+  const win = DIAG_WINDOWS.find((w) => w.key === state.diagWindow) || DIAG_WINDOWS[0];
+  const scored = people.map((p) => ({ p, minutes: p[win.minutes] || 0, count: p[win.count] || 0 }))
+    .sort((a, b) => (b.minutes - a.minutes) || (b.count - a.count) || a.p.user.display_name.localeCompare(b.p.user.display_name));
+  const max = Math.max(1, ...scored.map((s) => s.minutes));
+  const toggle = DIAG_WINDOWS.map((w) => `<button type="button" data-diag-window="${w.key}" class="${w.key === state.diagWindow ? "active" : ""}">${w.label}</button>`).join("");
+  const rows = scored.map(({ p, minutes, count }) => {
+    const width = minutes ? Math.max(1.5, (minutes / max) * 100) : 0;
+    const tip = `${p.user.display_name}\n${count} ${count === 1 ? "dope" : "dopes"} doped\n${formatMinutes(minutes)}${p.in_progress_count ? `\ncarrying ${formatMinutes(p.in_progress_minutes)} now` : ""}`;
+    return `
+      <div class="diag-bar-row">
+        <span class="diag-bar-label" title="${escapeHtml(p.user.display_name)}">
+          <span class="online-dot ${p.online ? "is-online" : ""}" title="${p.online ? "Online now" : "Offline"}"></span>${escapeHtml(p.user.display_name)}
+        </span>
+        <span class="diag-bar-track">${minutes ? `<span class="diag-bar" style="width:${width}%;background:${escapeHtml(normalizeUserColor(p.user.color))}" data-progress-tip="${escapeHtml(tip)}"></span>` : ""}</span>
+        <span class="diag-bar-value">${count ? `${count} · ${formatMinutes(minutes)}` : "—"}</span>
+      </div>
+    `;
+  }).join("");
+  const carrying = people.filter((p) => p.in_progress_count)
+    .map((p) => `<button type="button" class="diag-chip" data-progress-tip="${escapeHtml(`${p.user.display_name}\n${p.in_progress_count} in progress\n${formatMinutes(p.in_progress_minutes)}`)}">
+        <span class="diag-key" style="background:${escapeHtml(normalizeUserColor(p.user.color))}"></span>${escapeHtml(p.user.display_name)}<small>${formatMinutes(p.in_progress_minutes)}</small>
+      </button>`).join("");
+  const footer = people.map((p) => `
+    <div class="diag-person-meta">
+      <span>${escapeHtml(p.user.display_name)}</span>
+      <small>${p.created_count} created · ${p.comments_count} ${p.comments_count === 1 ? "comment" : "comments"}${p.online ? " · online" : p.last_seen_at ? ` · seen ${timeAgo(p.last_seen_at)}` : ""}</small>
+    </div>
+  `).join("");
+  return `
+    <section class="diag-card">
+      <div class="diag-card-head">
+        <span class="diag-card-label">Doped per person</span>
+        <div class="progress-range diag-range" role="group" aria-label="Time window">${toggle}</div>
+      </div>
+      <div class="diag-bars">${rows || `<p class="empty mini">No members yet.</p>`}</div>
+      ${carrying ? `<div class="diag-carrying"><span class="diag-card-label">On it right now</span><div class="diag-chips">${carrying}</div></div>` : ""}
+      <details class="diag-details">
+        <summary>Member details</summary>
+        <div class="diag-person-metas">${footer}</div>
+      </details>
+    </section>
+  `;
+}
+
+function normalizeUserColor(color) {
+  return /^#[0-9a-fA-F]{6}$/.test(color || "") ? color : DEFAULT_COLOR;
+}
+
+function diagActivityHtml(activity) {
+  if (!activity.length) return `<section class="diag-card"><span class="diag-card-label">What happened</span><p class="empty mini">Nothing yet. Create a dope to get the feed going.</p></section>`;
+  const groups = [];
+  activity.forEach((e) => {
+    const label = diagDayLabel(e.at);
+    const group = groups[groups.length - 1];
+    if (group && group.label === label) group.items.push(e);
+    else groups.push({ label, items: [e] });
+  });
+  const body = groups.map((group) => `
+    <div class="diag-day">
+      <span class="diag-day-label">${escapeHtml(group.label)}</span>
+      <ul class="diag-feed">
+        ${group.items.map((e) => {
+          const meta = ACTIVITY_META[e.type] || { icon: "ph-dot", verb: e.type };
+          const detail = e.detail ? `<small class="diag-feed-detail">${e.type === "commented" ? `“${escapeHtml(e.detail)}”` : escapeHtml(e.detail)}</small>` : "";
+          return `<li>
+            <button type="button" class="diag-feed-row" data-diag-dope="${e.dope_id}">
+              <i class="ph ${meta.icon} diag-feed-icon is-${e.type}"></i>
+              <span class="diag-feed-body">
+                <span><strong>${escapeHtml(e.user?.display_name || "someone")}</strong> ${meta.verb} <strong>${escapeHtml(e.dope_title)}</strong></span>
+                ${detail}
+              </span>
+              <time class="diag-feed-time">${escapeHtml(timeAgo(e.at))}</time>
+            </button>
+          </li>`;
+        }).join("")}
+      </ul>
+    </div>
+  `).join("");
+  return `
+    <section class="diag-card">
+      <div class="diag-card-head">
+        <span class="diag-card-label">What happened</span>
+        <small>last ${activity.length} events</small>
+      </div>
+      <div class="diag-timeline">${body}</div>
+    </section>
+  `;
+}
+
+function renderDiagnostics() {
+  const d = state.diag;
+  if (!d || state.route !== "diagnostics") return;
+  $("diag-updated").textContent = `updated ${timeAgo(d.generated_at)}`;
+  $("diagnostics-body").innerHTML = `
+    ${diagHeroHtml(d.totals)}
+    <div class="diag-grid">
+      ${diagPeopleHtml(d.per_person)}
+      ${diagCategoriesHtml(d.remaining_by_category, d.totals.active_minutes || 0)}
+    </div>
+    ${diagActivityHtml(d.activity)}
+  `;
+  document.querySelectorAll("[data-diag-window]").forEach((button) => {
+    button.onclick = (event) => {
+      event.preventDefault();
+      state.diagWindow = button.dataset.diagWindow;
+      renderDiagnostics();
+    };
+  });
   document.querySelectorAll("[data-diag-dope]").forEach((el) => {
-    el.onclick = () => {
-      $("diagnostics-dialog").close();
+    el.onclick = (event) => {
+      event.preventDefault();
       openDope(Number(el.dataset.diagDope));
     };
   });
 }
 
-async function openDiagnostics() {
-  $("diagnostics-body").innerHTML = `<p class="empty mini">Loading diagnostics…</p>`;
-  $("diagnostics-dialog").showModal();
-  try {
-    renderDiagnostics(await api("/api/diagnostics"));
-  } catch (err) {
-    $("diagnostics-body").innerHTML = `<p class="empty mini">${escapeHtml(err.message || "Could not load diagnostics")}</p>`;
+async function loadDiagnostics() {
+  const cached = cacheRead("diagnostics");
+  if (cached && !state.diag) {
+    state.diag = cached;
+    renderDiagnostics();
   }
+  try {
+    state.diag = await api("/api/diagnostics?limit=80");
+    cacheWrite("diagnostics", state.diag);
+    renderDiagnostics();
+  } catch (err) {
+    if (!state.diag) $("diagnostics-body").innerHTML = `<p class="empty">${escapeHtml(err.message || "Could not load diagnostics")}</p>`;
+    else toast("Showing cached diagnostics");
+  }
+  clearInterval(state.diagTimer);
+  state.diagTimer = setInterval(async () => {
+    if (state.route !== "diagnostics" || document.hidden) return;
+    try {
+      state.diag = await api("/api/diagnostics?limit=80");
+      cacheWrite("diagnostics", state.diag);
+      renderDiagnostics();
+    } catch {}
+  }, 30000);
 }
 
 $("auth-toggle").onclick = () => { state.authMode = state.authMode === "login" ? "signup" : "login"; updateAuthMode(); };
@@ -1635,7 +1826,11 @@ $("filter-reset").onclick = (event) => {
   render();
 };
 $("categories-open").onclick = openCategories;
-$("diagnostics-open").onclick = openDiagnostics;
+$("diagnostics-open").onclick = () => {
+  if (state.route === "diagnostics") loadDiagnostics();
+  else location.hash = "diagnostics";
+};
+$("diag-refresh").onclick = (event) => { event.preventDefault(); loadDiagnostics(); };
 document.querySelectorAll("[data-progress-days]").forEach((button) => {
   button.onclick = async () => {
     state.progressDays = Number(button.dataset.progressDays);
@@ -1646,9 +1841,9 @@ document.querySelectorAll("[data-progress-days]").forEach((button) => {
     } catch (err) { toast(err.message); }
   };
 });
-$("progress-chart").addEventListener("pointerover", showProgressTooltip);
-$("progress-chart").addEventListener("pointermove", moveProgressTooltip);
-$("progress-chart").addEventListener("pointerout", (event) => {
+document.addEventListener("pointerover", showProgressTooltip);
+document.addEventListener("pointermove", moveProgressTooltip);
+document.addEventListener("pointerout", (event) => {
   if (!event.relatedTarget || !event.relatedTarget.closest?.("[data-progress-tip]")) hideProgressTooltip();
 });
 window.addEventListener("hashchange", async () => {

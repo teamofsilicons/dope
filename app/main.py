@@ -1419,7 +1419,10 @@ def diagnostics(
 ) -> dict[str, Any]:
     current_user(user_cookie, authorization)
     limit = max(1, min(limit, 200))
-    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+    now = datetime.now(timezone.utc)
+    week_ago = (now - timedelta(days=7)).isoformat(timespec="seconds")
+    two_weeks_ago = (now - timedelta(days=14)).isoformat(timespec="seconds")
+    month_ago = (now - timedelta(days=30)).isoformat(timespec="seconds")
     with db() as conn:
         users = conn.execute("SELECT * FROM users ORDER BY display_name COLLATE NOCASE, id").fetchall()
         active_rows = conn.execute(
@@ -1458,6 +1461,11 @@ def diagnostics(
             "in_progress_minutes": sum(r["time_minutes"] for r in active_rows if r["assigned_to"]),
             "ready": sum(1 for r in active_rows if not r["blocked"] and not r["assigned_to"]),
             "ready_minutes": sum(r["time_minutes"] for r in active_rows if not r["blocked"] and not r["assigned_to"]),
+            "completed_7d": sum(1 for r in completed_rows if r["completed_at"] >= week_ago),
+            "completed_7d_minutes": sum(r["time_minutes"] for r in completed_rows if r["completed_at"] >= week_ago),
+            "completed_prev7d_minutes": sum(
+                r["time_minutes"] for r in completed_rows if two_weeks_ago <= r["completed_at"] < week_ago
+            ),
         }
 
         by_category: dict[int | None, dict[str, Any]] = {}
@@ -1480,6 +1488,8 @@ def diagnostics(
                 "completed_minutes": 0,
                 "completed_7d_count": 0,
                 "completed_7d_minutes": 0,
+                "completed_30d_count": 0,
+                "completed_30d_minutes": 0,
                 "in_progress_count": 0,
                 "in_progress_minutes": 0,
                 "created_count": int(created_counts.get(u["id"], 0)),
@@ -1496,6 +1506,9 @@ def diagnostics(
             if row["completed_at"] >= week_ago:
                 stats["completed_7d_count"] += 1
                 stats["completed_7d_minutes"] += row["time_minutes"]
+            if row["completed_at"] >= month_ago:
+                stats["completed_30d_count"] += 1
+                stats["completed_30d_minutes"] += row["time_minutes"]
         for row in active_rows:
             stats = by_user.get(row["assigned_to"])
             if stats:

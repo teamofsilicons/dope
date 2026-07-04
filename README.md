@@ -42,8 +42,8 @@ which power the new-message badges.
 
 ### Diagnostics
 
-- `GET /api/diagnostics?limit=50` — team-wide overview (also in the UI via
-  the pulse icon, top right):
+- `GET /api/diagnostics?limit=50` — team-wide overview (in the UI it's a
+  dedicated page at `#diagnostics`, opened by the pulse icon, top right):
   - `totals` — active/completed/archived counts and minutes, plus how much
     is remaining split into `ready`, `in_progress`, and `blocked`.
   - `remaining_by_category` — open work grouped by category.
