@@ -36,6 +36,12 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def now_iso_precise() -> str:
+    # Comments and read markers compare timestamps with >, so they need
+    # sub-second precision to keep rapid back-and-forth unread-accurate.
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
 def parse_iso_datetime(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -147,6 +153,27 @@ def init_db() -> None:
               position INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS comments (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              dope_id INTEGER NOT NULL REFERENCES dopes(id) ON DELETE CASCADE,
+              user_id INTEGER NOT NULL REFERENCES users(id),
+              body TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS comment_mentions (
+              comment_id INTEGER NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+              user_id INTEGER NOT NULL REFERENCES users(id),
+              PRIMARY KEY (comment_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS comment_reads (
+              dope_id INTEGER NOT NULL REFERENCES dopes(id) ON DELETE CASCADE,
+              user_id INTEGER NOT NULL REFERENCES users(id),
+              last_read_at TEXT NOT NULL,
+              PRIMARY KEY (dope_id, user_id)
+            );
             """
         )
         conn.execute(
@@ -171,6 +198,8 @@ def init_db() -> None:
         }
         if "color" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN color TEXT NOT NULL DEFAULT '#1a1a1a'")
+        if "last_seen_at" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT")
         dope_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(dopes)").fetchall()
@@ -251,6 +280,17 @@ def hash_api_key(key: str) -> str:
     return hmac.new(SECRET_KEY.encode(), key.encode(), hashlib.sha256).hexdigest()
 
 
+def touch_last_seen(conn: sqlite3.Connection, user: sqlite3.Row) -> None:
+    last_seen = user["last_seen_at"] if "last_seen_at" in user.keys() else None
+    if last_seen:
+        try:
+            if datetime.now(timezone.utc) - parse_iso_datetime(last_seen) < timedelta(seconds=60):
+                return
+        except ValueError:
+            pass
+    conn.execute("UPDATE users SET last_seen_at = ? WHERE id = ?", (now_iso(), user["id"]))
+
+
 def current_user(dope_session: str | None = None, authorization: str | None = None) -> sqlite3.Row:
     if authorization and authorization.lower().startswith("bearer "):
         key = authorization.split(" ", 1)[1].strip()
@@ -265,12 +305,15 @@ def current_user(dope_session: str | None = None, authorization: str | None = No
                     conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (now_iso(), api_key["id"]))
                     user = conn.execute("SELECT * FROM users WHERE id = ?", (api_key["user_id"],)).fetchone()
                     if user:
+                        touch_last_seen(conn, user)
                         return user
     payload = unsign(dope_session)
     if not payload:
         raise HTTPException(status_code=401, detail="Not signed in")
     with db() as conn:
         user = conn.execute("SELECT * FROM users WHERE id = ?", (payload["sub"],)).fetchone()
+        if user:
+            touch_last_seen(conn, user)
     if not user:
         raise HTTPException(status_code=401, detail="Not signed in")
     return user
@@ -323,6 +366,10 @@ class CategoryIn(BaseModel):
 
 class DopeCategoryIn(BaseModel):
     category_id: int | None = Field(default=None)
+
+
+class CommentIn(BaseModel):
+    body: str = Field(min_length=1, max_length=10_000)
 
 
 def parse_time_to_minutes(value: str) -> int:
@@ -538,7 +585,98 @@ def incomplete_dependency_rows(conn: sqlite3.Connection, dope_id: int) -> list[s
     ).fetchall()
 
 
-def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection) -> dict[str, Any]:
+ONLINE_WINDOW = timedelta(minutes=5)
+
+
+def is_online(last_seen_at: str | None) -> bool:
+    if not last_seen_at:
+        return False
+    try:
+        return datetime.now(timezone.utc) - parse_iso_datetime(last_seen_at) <= ONLINE_WINDOW
+    except ValueError:
+        return False
+
+
+def extract_mention_user_ids(conn: sqlite3.Connection, body: str) -> list[int]:
+    text = body.lower()
+    if "@" not in text:
+        return []
+    ids: list[int] = []
+    for row in conn.execute("SELECT id, username, display_name FROM users").fetchall():
+        tokens = {row["username"].strip().lower(), row["display_name"].strip().lower()}
+        for token in tokens:
+            if not token:
+                continue
+            needle = f"@{token}"
+            start = 0
+            matched = False
+            while (idx := text.find(needle, start)) != -1:
+                end = idx + len(needle)
+                if end >= len(text) or not (text[end].isalnum() or text[end] == "_"):
+                    matched = True
+                    break
+                start = idx + 1
+            if matched:
+                ids.append(row["id"])
+                break
+    return ids
+
+
+def comment_payload(row: sqlite3.Row, conn: sqlite3.Connection) -> dict[str, Any]:
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (row["user_id"],)).fetchone()
+    mentions = conn.execute(
+        """
+        SELECT u.* FROM comment_mentions cm
+        JOIN users u ON u.id = cm.user_id
+        WHERE cm.comment_id = ?
+        ORDER BY u.display_name COLLATE NOCASE
+        """,
+        (row["id"],),
+    ).fetchall()
+    return {
+        "id": row["id"],
+        "dope_id": row["dope_id"],
+        "body": row["body"],
+        "created_at": row["created_at"],
+        "user": user_public(user),
+        "mentions": [user_public(m) for m in mentions],
+    }
+
+
+def comment_meta(conn: sqlite3.Connection, dope_id: int, viewer_id: int | None) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS total,
+               MAX(c.created_at) AS latest,
+               SUM(CASE WHEN c.user_id != ? AND c.created_at > COALESCE(r.last_read_at, '') THEN 1 ELSE 0 END) AS unread,
+               SUM(CASE WHEN c.user_id != ? AND c.created_at > COALESCE(r.last_read_at, '') AND m.user_id IS NOT NULL THEN 1 ELSE 0 END) AS unread_mentions
+        FROM comments c
+        LEFT JOIN comment_reads r ON r.dope_id = c.dope_id AND r.user_id = ?
+        LEFT JOIN comment_mentions m ON m.comment_id = c.id AND m.user_id = ?
+        WHERE c.dope_id = ?
+        """,
+        (viewer_id, viewer_id, viewer_id, viewer_id, dope_id),
+    ).fetchone()
+    return {
+        "comment_count": int(row["total"] or 0),
+        "latest_comment_at": row["latest"],
+        "unread_comments": int(row["unread"] or 0) if viewer_id is not None else 0,
+        "unread_mentions": int(row["unread_mentions"] or 0) if viewer_id is not None else 0,
+    }
+
+
+def mark_comments_read(conn: sqlite3.Connection, dope_id: int, user_id: int, read_at: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO comment_reads (dope_id, user_id, last_read_at) VALUES (?, ?, ?)
+        ON CONFLICT(dope_id, user_id) DO UPDATE SET last_read_at = excluded.last_read_at
+        WHERE excluded.last_read_at > comment_reads.last_read_at
+        """,
+        (dope_id, user_id, read_at),
+    )
+
+
+def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection, viewer_id: int | None = None) -> dict[str, Any]:
     users = {
         u["id"]: u
         for u in conn.execute(
@@ -587,6 +725,7 @@ def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection) -> dict[str, Any]:
         "id": row["id"],
         "title": row["title"],
         "category": category,
+        **comment_meta(conn, row["id"], viewer_id),
         "description_html": row["description_html"],
         "time_minutes": row["time_minutes"],
         "created_at": row["created_at"],
@@ -836,7 +975,7 @@ def list_dopes(
     user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
     authorization: str | None = Header(default=None),
 ) -> list[dict[str, Any]]:
-    current_user(user_cookie, authorization)
+    user = current_user(user_cookie, authorization)
     where = {
         "active": "archived_at IS NULL AND completed_at IS NULL",
         "completed": "archived_at IS NULL AND completed_at IS NOT NULL",
@@ -903,7 +1042,7 @@ def list_dopes(
         order = "completed_at DESC, id DESC" if status == "completed" else "id DESC"
     with db() as conn:
         rows = conn.execute(f"SELECT * FROM dopes WHERE {where} ORDER BY {order}").fetchall()
-        payloads = [dope_payload(row, conn) for row in rows]
+        payloads = [dope_payload(row, conn, user["id"]) for row in rows]
     if status == "active":
         def active_sort_key(item: dict[str, Any]) -> tuple[int, int, str, int]:
             dependency_count = len([dep for dep in item["dependencies"] if dep["status"] != "archived"])
@@ -999,7 +1138,7 @@ def create_dope(
         set_dope_dependencies(conn, dope_id, data.dependency_ids)
         add_dope_version(conn, dope_id, data.title.strip(), data.description_html, user["id"], now_iso())
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (cur.lastrowid,)).fetchone()
-        return dope_payload(row, conn)
+        return dope_payload(row, conn, user["id"])
 
 
 @app.put("/api/dopes/{dope_id}")
@@ -1026,7 +1165,7 @@ def edit_dope(
         if row["category_id"] != category_id:
             conn.execute("UPDATE dopes SET category_id = ? WHERE id = ?", (category_id, dope_id))
         set_dope_dependencies(conn, dope_id, data.dependency_ids)
-        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn)
+        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
 @app.post("/api/dopes/{dope_id}/assign")
@@ -1051,7 +1190,7 @@ def assign_dope(
             "INSERT INTO assignment_history (dope_id, user_id, display_name, assigned_at) VALUES (?, ?, ?, ?)",
             (dope_id, user["id"], user["display_name"], assigned_at),
         )
-        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn)
+        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
 @app.post("/api/dopes/{dope_id}/unassign")
@@ -1061,7 +1200,7 @@ def unassign_dope(
     user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    current_user(user_cookie, authorization)
+    user = current_user(user_cookie, authorization)
     unassigned_at = now_iso()
     reason = data.reason.strip()
     if not reason:
@@ -1082,7 +1221,7 @@ def unassign_dope(
             """,
             (unassigned_at, reason, dope_id),
         )
-        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn)
+        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
 @app.post("/api/dopes/{dope_id}/complete")
@@ -1129,7 +1268,7 @@ def complete_dope(
             """,
             (completed_at, dope_id),
         )
-        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn)
+        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
 @app.patch("/api/dopes/{dope_id}/category")
@@ -1139,14 +1278,14 @@ def set_dope_category(
     user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    current_user(user_cookie, authorization)
+    user = current_user(user_cookie, authorization)
     with db() as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Dope not found")
         category_id = validate_category_id(conn, data.category_id)
         conn.execute("UPDATE dopes SET category_id = ? WHERE id = ?", (category_id, dope_id))
-        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn)
+        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
 @app.post("/api/dopes/{dope_id}/archive")
@@ -1164,7 +1303,7 @@ def archive_dope(
             "UPDATE dopes SET archived_by = ?, archived_at = ? WHERE id = ?",
             (user["id"], now_iso(), dope_id),
         )
-        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn)
+        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
 @app.post("/api/dopes/{dope_id}/restore")
@@ -1173,10 +1312,114 @@ def restore_dope(
     user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    current_user(user_cookie, authorization)
+    user = current_user(user_cookie, authorization)
     with db() as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Dope not found")
         conn.execute("UPDATE dopes SET archived_by = NULL, archived_at = NULL WHERE id = ?", (dope_id,))
-        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn)
+        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
+
+
+@app.get("/api/users")
+def list_users(
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    current_user(user_cookie, authorization)
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM users ORDER BY display_name COLLATE NOCASE, id").fetchall()
+    return [
+        {
+            **user_public(row),  # type: ignore[dict-item]
+            "online": is_online(row["last_seen_at"]),
+            "last_seen_at": row["last_seen_at"],
+        }
+        for row in rows
+    ]
+
+
+def require_dope(conn: sqlite3.Connection, dope_id: int) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Dope not found")
+    return row
+
+
+@app.get("/api/dopes/{dope_id}/comments")
+def list_comments(
+    dope_id: int,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    current_user(user_cookie, authorization)
+    with db() as conn:
+        require_dope(conn, dope_id)
+        rows = conn.execute(
+            "SELECT * FROM comments WHERE dope_id = ? ORDER BY created_at, id",
+            (dope_id,),
+        ).fetchall()
+        return [comment_payload(row, conn) for row in rows]
+
+
+@app.post("/api/dopes/{dope_id}/comments")
+def create_comment(
+    dope_id: int,
+    data: CommentIn,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user = current_user(user_cookie, authorization)
+    body = data.body.strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Comment cannot be empty")
+    created_at = now_iso_precise()
+    with db() as conn:
+        require_dope(conn, dope_id)
+        cur = conn.execute(
+            "INSERT INTO comments (dope_id, user_id, body, created_at) VALUES (?, ?, ?, ?)",
+            (dope_id, user["id"], body, created_at),
+        )
+        comment_id = int(cur.lastrowid)
+        mention_ids = extract_mention_user_ids(conn, body)
+        conn.executemany(
+            "INSERT OR IGNORE INTO comment_mentions (comment_id, user_id) VALUES (?, ?)",
+            [(comment_id, mention_id) for mention_id in mention_ids],
+        )
+        mark_comments_read(conn, dope_id, user["id"], created_at)
+        row = conn.execute("SELECT * FROM comments WHERE id = ?", (comment_id,)).fetchone()
+        return comment_payload(row, conn)
+
+
+@app.delete("/api/dopes/{dope_id}/comments/{comment_id}")
+def delete_comment(
+    dope_id: int,
+    comment_id: int,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user = current_user(user_cookie, authorization)
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM comments WHERE id = ? AND dope_id = ?", (comment_id, dope_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Comment not found")
+        if row["user_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="You can only delete your own comments")
+        conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
+    return {"ok": True}
+
+
+@app.post("/api/dopes/{dope_id}/comments/read")
+def read_comments(
+    dope_id: int,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user = current_user(user_cookie, authorization)
+    read_at = now_iso_precise()
+    with db() as conn:
+        require_dope(conn, dope_id)
+        mark_comments_read(conn, dope_id, user["id"], read_at)
+    return {"ok": True, "last_read_at": read_at}

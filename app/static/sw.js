@@ -1,8 +1,8 @@
-const CACHE_NAME = "dope-shell-20260626-cats2";
+const CACHE_NAME = "dope-shell-20260704-comments";
 const SHELL_ASSETS = [
   "/",
-  "/static/app.css?v=20260626-cats2",
-  "/static/app.js?v=20260626-cats2",
+  "/static/app.css?v=20260704-comments",
+  "/static/app.js?v=20260704-comments",
   "/static/si-logo-light.png",
 ];
 

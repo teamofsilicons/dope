@@ -9,6 +9,8 @@ const state = {
   filters: { categoryIds: [], min: "", max: "", createdFrom: "", createdTo: "", depsDoped: false, completedBy: "", from: "", to: "" },
   authMode: "login",
   booted: false,
+  users: [],
+  usersFetchedAt: 0,
 };
 
 const DEFAULT_FILTERS = { categoryIds: [], min: "", max: "", createdFrom: "", createdTo: "", depsDoped: false, completedBy: "", from: "", to: "" };
@@ -432,6 +434,17 @@ function hideProgressTooltip() {
   if (tip) tip.hidden = true;
 }
 
+function commentBadge(d) {
+  const count = d.comment_count || 0;
+  const unread = d.unread_comments || 0;
+  const mentioned = (d.unread_mentions || 0) > 0;
+  if (!count) return "";
+  return `<span class="pill comment-pill ${unread ? "has-unread" : ""}">
+    <i class="ph ph-chat-circle"></i>${count}
+    ${mentioned ? `<span class="comment-new is-mention">@ you</span>` : unread ? `<span class="comment-new">${unread} new</span>` : ""}
+  </span>`;
+}
+
 function card(d) {
   const status = d.status === "completed" ? `Completed by ${escapeHtml(d.completed_by?.display_name || "someone")} on ${localDate(d.completed_at)}` :
     d.status === "archived" ? `Archived ${localDate(d.archived_at)}` :
@@ -448,6 +461,7 @@ function card(d) {
       </span>
     </span>
     <span class="card-pills">
+      ${commentBadge(d)}
       ${d.dependent_count ? `<span class="pill"><i class="ph ph-tree-structure"></i>${d.dependent_count} ${d.dependent_count === 1 ? "dependent" : "dependents"}</span>` : ""}
       <span class="pill"><i class="ph ph-clock"></i>${formatMinutes(d.time_minutes)}</span>
     </span>
@@ -715,6 +729,221 @@ function wireEditor(editor) {
   });
 }
 
+async function loadUsers(force = false) {
+  const fresh = state.usersFetchedAt && Date.now() - state.usersFetchedAt < 30000;
+  if (!force && fresh && state.users.length) return state.users;
+  try {
+    state.users = await api("/api/users");
+    state.usersFetchedAt = Date.now();
+  } catch {}
+  return state.users;
+}
+
+function updateDopeInState(updated) {
+  state.dopes = state.dopes.map((it) => (it.id === updated.id ? { ...it, ...updated } : it));
+  state.allDopes = state.allDopes.map((it) => (it.id === updated.id ? { ...it, ...updated } : it));
+  cacheWrite(`dopes:${state.route}`, state.dopes);
+}
+
+function commentsSectionHtml() {
+  return `
+    <section class="comments-block">
+      <h2>Comments</h2>
+      <div id="comment-list" class="comment-list"><p class="empty mini">Loading comments…</p></div>
+      <div class="comment-composer">
+        <div class="composer-box">
+          <div id="mention-menu" class="mention-menu" hidden></div>
+          <textarea id="comment-input" rows="2" placeholder="Write a comment. Type @ to mention a teammate."></textarea>
+        </div>
+        <button id="comment-send" type="button" title="Send"><i class="ph ph-paper-plane-right"></i></button>
+      </div>
+    </section>
+  `;
+}
+
+function commentBodyHtml(c) {
+  let html = linkifyText(c.body);
+  const tokens = [];
+  (c.mentions || []).forEach((m) => {
+    const isMe = state.user && m.id === state.user.id;
+    [m.username, m.display_name].forEach((name) => {
+      if (name) tokens.push({ name, isMe });
+    });
+  });
+  tokens.sort((a, b) => b.name.length - a.name.length).forEach(({ name, isMe }) => {
+    const pattern = escapeHtml(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    html = html.replace(new RegExp(`@${pattern}`, "gi"), (match) => `<span class="mention ${isMe ? "mention-me" : ""}">${match}</span>`);
+  });
+  return html;
+}
+
+function commentHtml(c) {
+  const mine = state.user && c.user?.id === state.user.id;
+  const initial = (c.user?.display_name || "?").trim().charAt(0).toUpperCase();
+  return `<div class="comment ${mine ? "is-mine" : ""}">
+    <span class="comment-avatar" style="background:${escapeHtml(c.user?.color || DEFAULT_COLOR)}">${escapeHtml(initial)}</span>
+    <div class="comment-body">
+      <div class="comment-meta">
+        <strong>${escapeHtml(c.user?.display_name || "someone")}</strong>
+        <span>${fullDate(c.created_at)}</span>
+        ${mine ? `<button type="button" class="comment-delete" data-comment-delete="${c.id}" title="Delete comment"><i class="ph ph-trash"></i></button>` : ""}
+      </div>
+      <div class="comment-text">${commentBodyHtml(c)}</div>
+    </div>
+  </div>`;
+}
+
+function bindComments(d) {
+  const list = $("comment-list");
+  const input = $("comment-input");
+  const send = $("comment-send");
+  if (!list || !input || !send) return;
+  const draftKey = `comment:${d.id}`;
+  input.value = draftRead(draftKey, {}).body || "";
+  let comments = [];
+
+  const renderList = () => {
+    if (!$("comment-list")) return;
+    $("comment-list").innerHTML = comments.length
+      ? comments.map(commentHtml).join("")
+      : `<p class="empty mini">No comments yet. Start the conversation.</p>`;
+    $("comment-list").querySelectorAll("[data-comment-delete]").forEach((button) => {
+      button.onclick = async (event) => {
+        event.preventDefault();
+        if (!confirm("Delete this comment?")) return;
+        try {
+          await api(`/api/dopes/${d.id}/comments/${button.dataset.commentDelete}`, { method: "DELETE" });
+          comments = comments.filter((c) => String(c.id) !== button.dataset.commentDelete);
+          updateDopeInState({ id: d.id, comment_count: comments.length });
+          renderList();
+          render();
+        } catch (err) { toast(err.message); }
+      };
+    });
+  };
+
+  const refresh = async (markRead) => {
+    comments = await api(`/api/dopes/${d.id}/comments`);
+    renderList();
+    if (markRead) {
+      await api(`/api/dopes/${d.id}/comments/read`, { method: "POST" }).catch(() => {});
+      updateDopeInState({ id: d.id, comment_count: comments.length, unread_comments: 0, unread_mentions: 0 });
+      render();
+    }
+  };
+
+  refresh(true).catch(() => {
+    if ($("comment-list")) $("comment-list").innerHTML = `<p class="empty mini">Could not load comments.</p>`;
+  });
+  loadUsers();
+
+  const timer = setInterval(() => {
+    if (!document.body.contains(list) || !$("dope-dialog").open) { clearInterval(timer); return; }
+    refresh(true).catch(() => {});
+  }, 15000);
+
+  input.addEventListener("input", () => draftWrite(draftKey, { body: input.value }));
+  setupMentionAutocomplete(input);
+
+  const post = async () => {
+    const body = input.value.trim();
+    if (!body) return;
+    send.disabled = true;
+    try {
+      const created = await api(`/api/dopes/${d.id}/comments`, { method: "POST", body: JSON.stringify({ body }) });
+      comments = [...comments, created];
+      input.value = "";
+      draftRemove(draftKey);
+      renderList();
+      updateDopeInState({ id: d.id, comment_count: comments.length, unread_comments: 0 });
+      render();
+      list.scrollTop = list.scrollHeight;
+    } catch (err) { toast(err.message); }
+    finally { send.disabled = false; }
+  };
+  send.onclick = (event) => { event.preventDefault(); post(); };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); post(); }
+  });
+}
+
+function setupMentionAutocomplete(textarea) {
+  const menu = $("mention-menu");
+  if (!menu) return;
+  let items = [];
+  let activeIndex = 0;
+  let context = null;
+
+  const closeMenu = () => { menu.hidden = true; items = []; context = null; };
+
+  const mentionContext = () => {
+    const pos = textarea.selectionStart;
+    const before = textarea.value.slice(0, pos);
+    const at = before.lastIndexOf("@");
+    if (at === -1) return null;
+    if (at > 0 && /[\w@]/.test(before[at - 1])) return null;
+    const token = before.slice(at + 1);
+    if (token.includes("\n") || token.length > 40) return null;
+    return { at, token };
+  };
+
+  const renderMenu = () => {
+    menu.innerHTML = items.map((u, i) => `
+      <button type="button" class="mention-item ${i === activeIndex ? "is-active" : ""}" data-mention-index="${i}">
+        <span class="online-dot ${u.online ? "is-online" : ""}"></span>
+        <strong>${escapeHtml(u.display_name)}</strong>
+        <small>@${escapeHtml(u.username)}${u.online ? " · online" : ""}</small>
+      </button>
+    `).join("");
+    menu.hidden = !items.length;
+    menu.querySelectorAll("[data-mention-index]").forEach((button) => {
+      button.onmousedown = (event) => { event.preventDefault(); pick(Number(button.dataset.mentionIndex)); };
+    });
+    const active = menu.querySelector(".mention-item.is-active");
+    if (active) active.scrollIntoView({ block: "nearest" });
+  };
+
+  const pick = (index) => {
+    const user = items[index];
+    if (!user || !context) return;
+    const pos = textarea.selectionStart;
+    const insert = `@${user.username} `;
+    textarea.value = textarea.value.slice(0, context.at) + insert + textarea.value.slice(pos);
+    const caret = context.at + insert.length;
+    textarea.setSelectionRange(caret, caret);
+    textarea.focus();
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    closeMenu();
+  };
+
+  const openMenu = async () => {
+    context = mentionContext();
+    if (!context) { closeMenu(); return; }
+    const users = await loadUsers();
+    const stillOpen = mentionContext();
+    if (!stillOpen || stillOpen.at !== context.at) return;
+    context = stillOpen;
+    const q = context.token.toLowerCase();
+    items = users
+      .filter((u) => !q || u.username.toLowerCase().includes(q) || u.display_name.toLowerCase().includes(q))
+      .sort((a, b) => (b.online - a.online) || a.display_name.localeCompare(b.display_name))
+      .slice(0, 8);
+    activeIndex = 0;
+    renderMenu();
+  };
+
+  textarea.addEventListener("input", openMenu);
+  textarea.addEventListener("click", openMenu);
+  textarea.addEventListener("blur", () => setTimeout(closeMenu, 150));
+  textarea.addEventListener("keydown", (event) => {
+    if (menu.hidden || !items.length) return;
+    if (event.key === "ArrowDown") { event.preventDefault(); activeIndex = (activeIndex + 1) % items.length; renderMenu(); }
+    else if (event.key === "ArrowUp") { event.preventDefault(); activeIndex = (activeIndex - 1 + items.length) % items.length; renderMenu(); }
+    else if (event.key === "Enter" || event.key === "Tab") { event.preventDefault(); pick(activeIndex); }
+    else if (event.key === "Escape") { event.preventDefault(); closeMenu(); }
+  });
+}
+
 async function openDope(id) {
   let d = state.dopes.find((item) => item.id === id) || state.allDopes.find((item) => item.id === id);
   if (!d) {
@@ -808,6 +1037,7 @@ async function openDope(id) {
       <div id="dope-version-description" class="description">${sanitizeHtml(activeVersion.description_html)}</div>
       ${completionNotes}
       ${history}
+      ${commentsSectionHtml()}
     </div>
     <div class="modal-action-bar">
       ${d.status !== "archived" ? `<button id="edit-dope" class="icon-action secondary" value="default" title="Edit"><i class="ph ph-pencil-simple"></i></button>` : ""}
@@ -851,6 +1081,7 @@ async function openDope(id) {
   bindDopeActions(d);
   bindVersionControls(d);
   bindInlineCategory(d);
+  bindComments(d);
   $("dope-dialog").showModal();
   bindModalChrome(d.title);
 }

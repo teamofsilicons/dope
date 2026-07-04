@@ -18,6 +18,35 @@ Open `http://127.0.0.1:8000`.
 - `DOPE_DB_PATH`: optional SQLite path. Defaults to `./dope.db`.
 - `DOPE_SECRET_KEY`: optional cookie signing secret. Set this in production.
 
+## API
+
+Every endpoint works with the browser session cookie or an API key created in
+Profile → API keys, sent as `Authorization: Bearer <key>`.
+
+### Comments
+
+Each dope has a comment thread. Mentions are extracted from the body by
+matching `@username` or `@display name` against real users.
+
+- `GET /api/users` — all members, each with `online` (active in the last 5
+  minutes) and `last_seen_at`. Used for the `@` mention picker.
+- `GET /api/dopes/{id}/comments` — the thread, oldest first. Each comment has
+  `id`, `body`, `created_at`, `user`, and `mentions`.
+- `POST /api/dopes/{id}/comments` — body `{"body": "text with @mentions"}`.
+- `DELETE /api/dopes/{id}/comments/{comment_id}` — author only.
+- `POST /api/dopes/{id}/comments/read` — mark the thread read for the caller.
+
+Dope payloads from `GET /api/dopes` include `comment_count`,
+`unread_comments`, `unread_mentions`, and `latest_comment_at` for the caller,
+which power the new-message badges.
+
+```bash
+curl -s -H "Authorization: Bearer $DOPE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"body": "Deployed, please verify @saket"}' \
+  https://example.com/api/dopes/42/comments
+```
+
 ## Deploy
 
 The app runs as a systemd service behind nginx (see `deploy/`). To ship the
