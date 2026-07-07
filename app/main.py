@@ -1271,6 +1271,51 @@ def complete_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
+@app.post("/api/dopes/{dope_id}/uncomplete")
+def uncomplete_dope(
+    dope_id: int,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user = current_user(user_cookie, authorization)
+    with db() as conn:
+        row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
+        if not row or row["archived_at"] or not row["completed_at"]:
+            raise HTTPException(status_code=404, detail="Completed dope not found")
+        reopened_assignment = conn.execute(
+            """
+            SELECT id, user_id, assigned_at
+            FROM assignment_history
+            WHERE dope_id = ? AND unassigned_at = ? AND unassign_reason IS NULL
+            ORDER BY id DESC LIMIT 1
+            """,
+            (dope_id, row["completed_at"]),
+        ).fetchone()
+        conn.execute(
+            """
+            UPDATE dopes
+            SET completed_by = NULL,
+                completed_at = NULL,
+                completion_description = NULL,
+                assigned_to = ?,
+                assigned_at = ?
+            WHERE id = ?
+            """,
+            (
+                reopened_assignment["user_id"] if reopened_assignment else None,
+                reopened_assignment["assigned_at"] if reopened_assignment else None,
+                dope_id,
+            ),
+        )
+        if reopened_assignment:
+            conn.execute(
+                "UPDATE assignment_history SET unassigned_at = NULL WHERE id = ?",
+                (reopened_assignment["id"],),
+            )
+        conn.execute("DELETE FROM commit_links WHERE dope_id = ?", (dope_id,))
+        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
+
+
 @app.patch("/api/dopes/{dope_id}/category")
 def set_dope_category(
     dope_id: int,

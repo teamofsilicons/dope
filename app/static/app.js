@@ -1059,6 +1059,7 @@ async function openDope(id) {
       ${d.status === "active" && blocked ? `<button class="primary-wide" value="default" disabled><i class="ph ph-warning-circle"></i>Dependencies Undoped</button>` : ""}
       ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="assign" class="primary-wide" value="default"><i class="ph ph-target"></i>I'll take it</button>` : ""}
       ${d.status === "active" && !blocked ? `<button id="complete" class="${d.assigned_to ? "primary-wide" : "secondary action-text"}" value="default"><i class="ph ph-confetti"></i>Doped</button>` : ""}
+      ${d.status === "completed" ? `<button id="uncomplete" class="secondary action-text" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Mark Not Completed</button>` : ""}
     </div>
   `;
   document.querySelectorAll("[data-dependency-open]").forEach((el) => {
@@ -1113,6 +1114,13 @@ function bindDopeActions(d) {
   if (unassign) unassign.onclick = (event) => { event.preventDefault(); openUnassignDope(d); };
   const complete = $("complete");
   if (complete) complete.onclick = (event) => { event.preventDefault(); openCompleteDope(d); };
+  const uncomplete = $("uncomplete");
+  if (uncomplete) uncomplete.onclick = async (event) => {
+    event.preventDefault();
+    if (!confirm("Mark this dope as not completed?")) return;
+    await api(`/api/dopes/${d.id}/uncomplete`, { method: "POST" });
+    await closeReload("Dope marked not completed");
+  };
   const archive = $("archive");
   if (archive) archive.onclick = async (event) => {
     event.preventDefault();
