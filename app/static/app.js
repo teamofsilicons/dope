@@ -14,6 +14,12 @@ const state = {
   diag: null,
   diagWindow: "7d",
   diagTimer: null,
+  boardTimer: null,
+  dayTimer: null,
+  boardRefreshInFlight: false,
+  lastBoardRefreshAt: 0,
+  categoriesFetchedAt: 0,
+  routeVersion: 0,
 };
 
 const DEFAULT_FILTERS = { categoryIds: [], min: "", max: "", createdFrom: "", createdTo: "", depsDoped: false, completedBy: "", from: "", to: "" };
@@ -22,6 +28,11 @@ const $ = (id) => document.getElementById(id);
 const CACHE_PREFIX = "dope-cache:";
 const DRAFT_PREFIX = "dope-draft:";
 const DEFAULT_COLOR = "#1a1a1a";
+const BOARD_REFRESH_INTERVAL_MS = 30000;
+const CATEGORY_REFRESH_INTERVAL_MS = 120000;
+const BACKGROUND_REFRESH_MIN_MS = 5000;
+const DOPE_DAY_RESET_UTC_HOUR = 3;
+const DOPE_DAY_RESET_UTC_MINUTE = 30;
 
 function storageRead(prefix, key, fallback = null) {
   try {
@@ -201,6 +212,7 @@ async function init() {
       state.booted = true;
       hideInitialLoading();
       setRouteLoading(false);
+      startAutoRefresh();
       toast("Offline cache");
       return;
     }
@@ -218,10 +230,12 @@ async function init() {
     state.booted = true;
     hideInitialLoading();
     setRouteLoading(false);
+    startAutoRefresh();
   }
 }
 
 async function loadRoute() {
+  const routeVersion = ++state.routeVersion;
   if (state.booted) setRouteLoading(true);
   try {
     state.route = location.hash.replace("#", "") || "active";
@@ -246,30 +260,117 @@ async function loadRoute() {
     $("new-dope").style.display = isActive ? "inline-flex" : "none";
     $("active-assigned-wrap").style.display = isActive ? "block" : "none";
     $("completed-filters").style.display = state.route === "completed" ? "block" : "none";
+    const progressDays = state.progressDays;
     const cachedDopes = cacheRead(`dopes:${state.route}`);
-    const cachedProgress = cacheRead(`progress:${state.progressDays}`);
+    const cachedProgress = cacheRead(`progress:${progressDays}`);
     if (cachedDopes) state.dopes = cachedDopes;
     if (isActive && cachedProgress) state.progress = cachedProgress;
-    if (cachedDopes) render();
+    if (cachedDopes && routeVersion === state.routeVersion) render();
     try {
+      let nextDopes;
+      let nextProgress = state.progress;
       if (isActive) {
-        [state.dopes, state.progress] = await Promise.all([
+        [nextDopes, nextProgress] = await Promise.all([
           api(`/api/dopes?status=${state.route}`),
-          api(`/api/stats/progress?days=${state.progressDays}`),
+          api(`/api/stats/progress?days=${progressDays}`),
         ]);
-        cacheWrite(`progress:${state.progressDays}`, state.progress);
       } else {
-        state.dopes = await api(`/api/dopes?status=${state.route}`);
+        nextDopes = await api(`/api/dopes?status=${state.route}`);
       }
+      if (routeVersion !== state.routeVersion || (isActive && state.progressDays !== progressDays)) return;
+      state.dopes = nextDopes;
+      state.progress = nextProgress;
+      if (isActive) cacheWrite(`progress:${progressDays}`, state.progress);
       cacheWrite(`dopes:${state.route}`, state.dopes);
       state.allDopes = [];
+      state.lastBoardRefreshAt = Date.now();
     } catch (err) {
       if (!cachedDopes) throw err;
       toast("Showing offline cache");
     }
-    render();
+    if (routeVersion === state.routeVersion) render();
   } finally {
     setRouteLoading(false);
+  }
+}
+
+function msUntilNextDopeDayReset(now = new Date()) {
+  const reset = new Date(now.getTime());
+  reset.setUTCHours(DOPE_DAY_RESET_UTC_HOUR, DOPE_DAY_RESET_UTC_MINUTE, 0, 0);
+  if (reset <= now) reset.setUTCDate(reset.getUTCDate() + 1);
+  return reset.getTime() - now.getTime();
+}
+
+function refreshVisibleData({ force = false } = {}) {
+  if (!state.user || !state.booted) return;
+  if (state.route === "diagnostics") {
+    if (force || !document.hidden) loadDiagnostics().catch(() => {});
+    return;
+  }
+  refreshCurrentRoute({ force }).catch(() => {});
+}
+
+function scheduleDopeDayRefresh() {
+  clearTimeout(state.dayTimer);
+  state.dayTimer = setTimeout(() => {
+    refreshVisibleData({ force: true });
+    scheduleDopeDayRefresh();
+  }, msUntilNextDopeDayReset() + 2000);
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  state.boardTimer = setInterval(() => {
+    refreshCurrentRoute().catch(() => {});
+  }, BOARD_REFRESH_INTERVAL_MS);
+  scheduleDopeDayRefresh();
+}
+
+function stopAutoRefresh() {
+  clearInterval(state.boardTimer);
+  clearTimeout(state.dayTimer);
+  state.boardTimer = null;
+  state.dayTimer = null;
+}
+
+async function maybeRefreshCategories() {
+  if (Date.now() - state.categoriesFetchedAt < CATEGORY_REFRESH_INTERVAL_MS) return;
+  await loadCategories(true).catch(() => {});
+}
+
+async function refreshCurrentRoute({ force = false } = {}) {
+  if (!state.user || !state.booted || state.route === "diagnostics") return;
+  if (!force && document.hidden) return;
+  if (state.boardRefreshInFlight) return;
+  if (!force && Date.now() - state.lastBoardRefreshAt < BACKGROUND_REFRESH_MIN_MS) return;
+
+  const route = state.route;
+  const routeVersion = state.routeVersion;
+  const progressDays = state.progressDays;
+  state.boardRefreshInFlight = true;
+  try {
+    const categoryRefresh = maybeRefreshCategories();
+    let dopes;
+    let progress = state.progress;
+    if (route === "active") {
+      [dopes, progress] = await Promise.all([
+        api(`/api/dopes?status=${route}`),
+        api(`/api/stats/progress?days=${progressDays}`),
+      ]);
+    } else {
+      dopes = await api(`/api/dopes?status=${route}`);
+    }
+    await categoryRefresh;
+    if (state.route !== route || state.routeVersion !== routeVersion || (route === "active" && state.progressDays !== progressDays)) return;
+    state.dopes = dopes;
+    state.progress = progress;
+    if (route === "active") cacheWrite(`progress:${progressDays}`, state.progress);
+    cacheWrite(`dopes:${route}`, state.dopes);
+    state.allDopes = [];
+    state.lastBoardRefreshAt = Date.now();
+    render();
+  } finally {
+    state.boardRefreshInFlight = false;
   }
 }
 
@@ -301,6 +402,7 @@ async function loadCategories(force = false) {
   try {
     state.categories = await api("/api/categories");
     cacheWrite("categories", state.categories);
+    state.categoriesFetchedAt = Date.now();
   } catch {
     if (cached) state.categories = cached;
   }
@@ -1783,12 +1885,20 @@ $("auth-form").onsubmit = async (event) => {
     loadCategories(true).then(render).catch(() => {});
     try {
       await loadRoute();
+      startAutoRefresh();
     } catch (err) {
       toast(err.message || "Could not load dopes");
     }
   } catch (err) { toast(err.message); }
 };
-$("logout").onclick = async () => { await api("/api/auth/logout", { method: "POST" }); state.user = null; showAuth(); };
+$("logout").onclick = async () => {
+  await api("/api/auth/logout", { method: "POST" });
+  stopAutoRefresh();
+  clearInterval(state.diagTimer);
+  state.diagTimer = null;
+  state.user = null;
+  showAuth();
+};
 $("profile-open").onclick = openProfile;
 $("new-dope").onclick = openNewDope;
 $("search").oninput = render;
@@ -1854,6 +1964,11 @@ document.addEventListener("pointermove", moveProgressTooltip);
 document.addEventListener("pointerout", (event) => {
   if (!event.relatedTarget || !event.relatedTarget.closest?.("[data-progress-tip]")) hideProgressTooltip();
 });
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshVisibleData({ force: true });
+});
+window.addEventListener("focus", () => refreshVisibleData({ force: true }));
+window.addEventListener("online", () => refreshVisibleData({ force: true }));
 window.addEventListener("hashchange", async () => {
   try {
     await loadRoute();
