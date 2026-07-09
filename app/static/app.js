@@ -570,22 +570,24 @@ function commentBadge(d) {
 
 function card(d) {
   const review = d.review || {};
+  const hasReviewChanges = d.status === "active" && review.rejected_at;
   const status = d.status === "review" ? `In review from ${escapeHtml(d.completed_by?.display_name || "someone")} on ${localDate(d.completed_at)}` :
     d.status === "completed" && review.rejected_at ? `Review rejected by ${escapeHtml(review.rejected_by?.display_name || "someone")}` :
     d.status === "completed" ? `Completed by ${escapeHtml(d.completed_by?.display_name || "someone")} on ${localDate(d.completed_at)}` :
     d.status === "archived" ? `Archived ${localDate(d.archived_at)}` :
+    hasReviewChanges ? `Review changes${d.assigned_to ? ` assigned to ${escapeHtml(d.assigned_to.display_name)}` : ""}` :
     review.parent_id ? `Review changes${d.assigned_to ? ` assigned to ${escapeHtml(d.assigned_to.display_name)}` : ""}` :
     d.assigned_to ? `Claimed by ${escapeHtml(d.assigned_to.display_name)}` : "";
   const blocked = d.status === "active" && (d.blocked_dependencies || []).length > 0;
   const cat = d.category;
   const accent = cat ? ` style="--accent:${escapeHtml(cat.color)}"` : "";
-  return `<button class="dope-card ${blocked ? "is-blocked" : ""} ${d.status === "review" ? "is-review" : ""} ${review.parent_id ? "is-review-change" : ""} ${cat ? "has-accent" : ""}" data-dope="${d.id}"${accent}>
+  return `<button class="dope-card ${blocked ? "is-blocked" : ""} ${d.status === "review" ? "is-review" : ""} ${review.parent_id || hasReviewChanges ? "is-review-change" : ""} ${cat ? "has-accent" : ""}" data-dope="${d.id}"${accent}>
     <span class="card-main">
       <h3>${escapeHtml(d.title)}</h3>
       <span class="card-tags">
         ${cat ? categoryPill(cat) : ""}
         ${d.status === "review" ? `<span class="pill review-pill"><i class="ph ph-git-branch"></i>Review</span>` : ""}
-        ${review.parent_id ? `<span class="pill review-pill"><i class="ph ph-arrow-bend-up-right"></i>Review changes</span>` : ""}
+        ${review.parent_id || hasReviewChanges ? `<span class="pill review-pill"><i class="ph ph-arrow-bend-up-right"></i>Review changes</span>` : ""}
         ${status ? `<span class="meta"><span>${status}</span></span>` : ""}
       </span>
     </span>
@@ -1368,6 +1370,7 @@ async function openEditDope(d) {
     <div class="modal-content">
       <label>Title<input id="edit-title" name="dope_edit_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" value="${escapeHtml(draft.title || d.title)}"></label>
       <label>Description<div id="edit-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(draft.description_html || d.description_html)}</div></label>
+      <label>Time to complete<input id="edit-time" name="dope_edit_time" autocomplete="off" placeholder="2hr, 30min, 0.5hr" value="${escapeHtml(draft.time_text || formatMinutes(d.time_minutes))}"></label>
       ${categoryPickerHtml(selectedCategory)}
       ${dependencyPickerHtml(selectedDeps, d.id)}
     </div>
@@ -1382,6 +1385,7 @@ async function openEditDope(d) {
   bindDraftFields(draftKey, [
     ["title", "edit-title"],
     ["description_html", "edit-description", "html"],
+    ["time_text", "edit-time"],
     ["category_id", "category-picker", "category"],
     ["dependency_ids", "dependency-panel", "checked-list"],
   ]);
@@ -1393,6 +1397,7 @@ async function openEditDope(d) {
         body: JSON.stringify({
           title: $("edit-title").value,
           description_html: sanitizeHtml($("edit-description").innerHTML),
+          time_text: $("edit-time").value,
           category_id: selectedCategoryId(),
           dependency_ids: selectedDependencyIds(),
         }),
@@ -1477,10 +1482,10 @@ function openRejectReview(d) {
     <div class="modal-content">
       <h2>${escapeHtml(d.title)}</h2>
       <label>Reviewer notes<textarea id="review-reject-note" rows="8" placeholder="What needs to change?">${escapeHtml(draft.note || "")}</textarea></label>
-      <label>Time required<input id="review-reject-time" name="dope_review_reject_time" autocomplete="off" placeholder="30min, 2hr" value="${escapeHtml(draft.time_text || "")}"></label>
+      <label>Remaining time<input id="review-reject-time" name="dope_review_reject_time" autocomplete="off" placeholder="30min, 2hr" value="${escapeHtml(draft.time_text || formatMinutes(d.time_minutes))}"></label>
     </div>
     <div class="modal-action-bar">
-      <button id="confirm-reject-review" class="primary-wide danger" value="default"><i class="ph ph-x-circle"></i>Create Review Changes</button>
+      <button id="confirm-reject-review" class="primary-wide danger" value="default"><i class="ph ph-x-circle"></i>Reject Review</button>
     </div>
   `;
   bindDraftFields(draftKey, [["note", "review-reject-note"], ["time_text", "review-reject-time"]]);
@@ -1495,7 +1500,7 @@ function openRejectReview(d) {
       $("dope-dialog").close();
       if (location.hash !== "#active") location.hash = "active";
       else await loadRoute();
-      toast("Review changes created");
+      toast("Review rejected");
     } catch (err) { toast(err.message); }
   };
 }

@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import html
 import json
 import os
 import re
@@ -374,6 +373,7 @@ class DopeIn(BaseModel):
 class DopeEditIn(BaseModel):
     title: str = Field(min_length=1, max_length=180)
     description_html: str = Field(min_length=1, max_length=250_000)
+    time_text: str = Field(min_length=1, max_length=40)
     dependency_ids: list[int] = Field(default_factory=list, max_length=50)
     category_id: int | None = Field(default=None)
 
@@ -1258,16 +1258,17 @@ def edit_dope(
 ) -> dict[str, Any]:
     user = current_user(user_cookie, authorization)
     title = data.title.strip()
+    minutes = parse_time_to_minutes(data.time_text)
     edited_at = now_iso()
     with db() as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or row["archived_at"]:
             raise HTTPException(status_code=404, detail="Editable dope not found")
         category_id = validate_category_id(conn, data.category_id)
-        if row["title"] != title or row["description_html"] != data.description_html:
+        if row["title"] != title or row["description_html"] != data.description_html or row["time_minutes"] != minutes:
             conn.execute(
-                "UPDATE dopes SET title = ?, description_html = ? WHERE id = ?",
-                (title, data.description_html, dope_id),
+                "UPDATE dopes SET title = ?, description_html = ?, time_minutes = ? WHERE id = ?",
+                (title, data.description_html, minutes, dope_id),
             )
             add_dope_version(conn, dope_id, title, data.description_html, user["id"], edited_at)
         if row["category_id"] != category_id:
@@ -1412,7 +1413,8 @@ def send_dope_for_review(
                 review_rejected_by = NULL,
                 review_rejected_at = NULL,
                 review_rejection_note = NULL,
-                review_followup_id = NULL
+                review_followup_id = NULL,
+                review_priority = 0
             WHERE id = ?
             """,
             (user["id"], completed_at, review_note, user["id"], completed_at, review_note, branch_url, dope_id),
@@ -1475,58 +1477,29 @@ def reject_dope_review(
         owner = conn.execute("SELECT * FROM users WHERE id = ?", (owner_id,)).fetchone()
         if not owner:
             raise HTTPException(status_code=400, detail="Review owner not found")
-        branch_url = row["review_branch_url"] or ""
-        note_html = html.escape(rejection_note).replace("\n", "<br>")
-        title_html = html.escape(row["title"])
-        branch_html = html.escape(branch_url)
-        description_html = (
-            f"<p><strong>Review changes for:</strong> {title_html}</p>"
-            f"<p><strong>Reviewer notes:</strong><br>{note_html}</p>"
-            f"<p><strong>Review branch:</strong> <a href=\"{branch_html}\">{branch_html}</a></p>"
-        )
-        cur = conn.execute(
-            """
-            INSERT INTO dopes (
-              title, description_html, time_minutes, created_by, created_at,
-              assigned_to, assigned_at, category_id, review_parent_id, review_priority
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"Review changes: {row['title']}",
-                description_html,
-                minutes,
-                user["id"],
-                rejected_at,
-                owner_id,
-                rejected_at,
-                row["category_id"],
-                dope_id,
-                1,
-            ),
-        )
-        followup_id = int(cur.lastrowid)
-        set_dope_dependencies(conn, followup_id, [dope_id])
-        add_dope_version(conn, followup_id, f"Review changes: {row['title']}", description_html, user["id"], rejected_at)
         conn.execute(
             "INSERT INTO assignment_history (dope_id, user_id, display_name, assigned_at) VALUES (?, ?, ?, ?)",
-            (followup_id, owner_id, owner["display_name"], rejected_at),
+            (dope_id, owner_id, owner["display_name"], rejected_at),
         )
         conn.execute(
             """
             UPDATE dopes
-            SET review_rejected_by = ?,
+            SET completed_by = NULL,
+                completed_at = NULL,
+                completion_description = NULL,
+                assigned_to = ?,
+                assigned_at = ?,
+                time_minutes = ?,
+                review_rejected_by = ?,
                 review_rejected_at = ?,
                 review_rejection_note = ?,
-                review_followup_id = ?
+                review_followup_id = NULL,
+                review_priority = 1
             WHERE id = ?
             """,
-            (user["id"], rejected_at, rejection_note, followup_id, dope_id),
+            (owner_id, rejected_at, minutes, user["id"], rejected_at, rejection_note, dope_id),
         )
-        return {
-            "reviewed": dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"]),
-            "followup": dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (followup_id,)).fetchone(), conn, user["id"]),
-        }
+        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
 @app.post("/api/dopes/{dope_id}/uncomplete")

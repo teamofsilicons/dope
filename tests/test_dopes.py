@@ -80,6 +80,48 @@ def test_completed_dope_can_be_marked_not_completed(tmp_path, monkeypatch):
         assert dope_id not in completed_ids
 
 
+def test_dope_edit_can_update_time(tmp_path, monkeypatch):
+    main = load_main(tmp_path, monkeypatch)
+
+    with TestClient(main.app) as client:
+        signup(client, "shubham", "Shubham")
+        login(client, "shubham")
+        created = client.post(
+            "/api/dopes",
+            json={
+                "title": "Adjust estimate",
+                "description_html": "<p>Body</p>",
+                "time_text": "30min",
+                "dependency_ids": [],
+            },
+        )
+        assert created.status_code == 200
+        dope_id = created.json()["id"]
+
+        updated = client.put(
+            f"/api/dopes/{dope_id}",
+            json={
+                "title": "Adjust estimate",
+                "description_html": "<p>Body</p>",
+                "time_text": "1.5hr",
+                "dependency_ids": [],
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["time_minutes"] == 90
+
+        invalid = client.put(
+            f"/api/dopes/{dope_id}",
+            json={
+                "title": "Adjust estimate",
+                "description_html": "<p>Body</p>",
+                "time_text": "later",
+                "dependency_ids": [],
+            },
+        )
+        assert invalid.status_code == 400
+
+
 def test_dope_can_be_sent_for_review_and_approved(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
@@ -143,7 +185,7 @@ def test_dope_can_be_sent_for_review_and_approved(tmp_path, monkeypatch):
         assert approved_payload["review"]["approved_by"]["display_name"] == "Saket"
 
 
-def test_rejected_review_creates_top_assigned_followup(tmp_path, monkeypatch):
+def test_rejected_review_reopens_original_dope(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
@@ -195,20 +237,20 @@ def test_rejected_review_creates_top_assigned_followup(tmp_path, monkeypatch):
         )
         assert rejected.status_code == 200
         body = rejected.json()
-        followup = body["followup"]
-        assert followup["status"] == "active"
-        assert followup["time_minutes"] == 40
-        assert followup["assigned_to"]["display_name"] == "Shubham"
-        assert followup["review"]["parent_id"] == dope_id
-        assert followup["review"]["priority"] == 1
-        assert followup["dependencies"][0]["id"] == dope_id
-
-        reviewed = body["reviewed"]
-        assert reviewed["status"] == "completed"
-        assert reviewed["review"]["rejected_by"]["display_name"] == "Saket"
-        assert reviewed["review"]["rejection_note"] == "Tighten empty state and add tests"
-        assert reviewed["review"]["followup_id"] == followup["id"]
+        assert body["id"] == dope_id
+        assert body["status"] == "active"
+        assert body["completed_at"] is None
+        assert body["completed_by"] is None
+        assert body["time_minutes"] == 40
+        assert body["assigned_to"]["display_name"] == "Shubham"
+        assert body["review"]["rejected_by"]["display_name"] == "Saket"
+        assert body["review"]["rejection_note"] == "Tighten empty state and add tests"
+        assert body["review"]["followup_id"] is None
+        assert body["review"]["parent_id"] is None
+        assert body["review"]["priority"] == 1
 
         active = client.get("/api/dopes?status=active").json()
-        assert active[0]["id"] == followup["id"]
+        assert active[0]["id"] == dope_id
         assert ordinary["id"] in {item["id"] for item in active}
+        assert len(client.get("/api/dopes?status=all").json()) == 2
+        assert client.get("/api/dopes?status=review").json() == []
