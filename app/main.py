@@ -30,6 +30,7 @@ COOKIE_NAME = "dope_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30
 IST_OFFSET = timedelta(hours=5, minutes=30)
 DOPE_DAY_RESET = datetime_time(hour=9)
+REVIEWER_USERNAMES = {"saket", "brainspoof"}
 
 app = FastAPI(title="Dope")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
@@ -468,6 +469,15 @@ def user_public(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if not row:
         return None
     return {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}
+
+
+def is_reviewer_user(row: sqlite3.Row | None) -> bool:
+    return bool(row and str(row["username"]).strip().lower() in REVIEWER_USERNAMES)
+
+
+def require_reviewer(user: sqlite3.Row) -> None:
+    if not is_reviewer_user(user):
+        raise HTTPException(status_code=403, detail="Review access is limited to Saket and Brainspoof")
 
 
 def normalize_color(value: str | None, fallback: str = "#1a1a1a") -> str:
@@ -1065,6 +1075,8 @@ def list_dopes(
     }.get(status)
     if not where:
         raise HTTPException(status_code=400, detail="Bad status")
+    if status == "review":
+        require_reviewer(user)
     if status == "active":
         order = """
         CASE
@@ -1422,6 +1434,7 @@ def approve_dope_review(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     user = current_user(user_cookie, authorization)
+    require_reviewer(user)
     approved_at = now_iso()
     with db() as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
@@ -1442,6 +1455,7 @@ def reject_dope_review(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     user = current_user(user_cookie, authorization)
+    require_reviewer(user)
     rejection_note = data.note.strip()
     if not rejection_note:
         raise HTTPException(status_code=400, detail="Reviewer notes are required")

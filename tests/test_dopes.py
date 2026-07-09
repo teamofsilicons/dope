@@ -38,7 +38,10 @@ def test_completed_dope_can_be_marked_not_completed(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        signup_and_login(client)
+        signup(client, "shubham", "Shubham")
+        signup(client, "saket", "Saket")
+        signup(client, "brainspoof", "Brainspoof")
+        login(client, "shubham")
         created = client.post(
             "/api/dopes",
             json={
@@ -81,7 +84,9 @@ def test_dope_can_be_sent_for_review_and_approved(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        signup_and_login(client)
+        signup(client, "shubham", "Shubham")
+        signup(client, "saket", "Saket")
+        login(client, "shubham")
         created = client.post(
             "/api/dopes",
             json={
@@ -114,6 +119,7 @@ def test_dope_can_be_sent_for_review_and_approved(tmp_path, monkeypatch):
         completed = client.get("/api/dopes?status=completed").json()
         assert completed[0]["id"] == dope_id
         assert completed[0]["status"] == "review"
+        assert client.get("/api/dopes?status=review").status_code == 403
 
         progress = client.get("/api/stats/progress?days=7").json()
         today = main.current_dope_day().isoformat()
@@ -121,11 +127,20 @@ def test_dope_can_be_sent_for_review_and_approved(tmp_path, monkeypatch):
         assert today_bucket["total_minutes"] == 45
         assert today_bucket["stacks"][0]["display_name"] == "Shubham"
 
+        blocked_approve = client.post(f"/api/dopes/{dope_id}/review/approve")
+        assert blocked_approve.status_code == 403
+
+        client.post("/api/auth/logout")
+        login(client, "saket")
+        review_queue = client.get("/api/dopes?status=review")
+        assert review_queue.status_code == 200
+        assert review_queue.json()[0]["id"] == dope_id
+
         approved = client.post(f"/api/dopes/{dope_id}/review/approve")
         assert approved.status_code == 200
         approved_payload = approved.json()
         assert approved_payload["status"] == "completed"
-        assert approved_payload["review"]["approved_by"]["display_name"] == "Shubham"
+        assert approved_payload["review"]["approved_by"]["display_name"] == "Saket"
 
 
 def test_rejected_review_creates_top_assigned_followup(tmp_path, monkeypatch):
@@ -134,6 +149,7 @@ def test_rejected_review_creates_top_assigned_followup(tmp_path, monkeypatch):
     with TestClient(main.app) as client:
         signup(client, "shubham", "Shubham")
         signup(client, "saket", "Saket")
+        signup(client, "brainspoof", "Brainspoof")
         login(client, "shubham")
         ordinary = client.post(
             "/api/dopes",
@@ -159,6 +175,17 @@ def test_rejected_review_creates_top_assigned_followup(tmp_path, monkeypatch):
             f"/api/dopes/{dope_id}/review",
             json={"note": "Ready for review", "branch_url": "https://github.com/team/repo/tree/review-me"},
         ).status_code == 200
+        blocked_reject = client.post(
+            f"/api/dopes/{dope_id}/review/reject",
+            json={"note": "Not enough", "time_text": "20min"},
+        )
+        assert blocked_reject.status_code == 403
+
+        client.post("/api/auth/logout")
+        login(client, "brainspoof")
+        brainspoof_queue = client.get("/api/dopes?status=review")
+        assert brainspoof_queue.status_code == 200
+        assert brainspoof_queue.json()[0]["id"] == dope_id
 
         client.post("/api/auth/logout")
         login(client, "saket")

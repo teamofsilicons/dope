@@ -33,6 +33,7 @@ const CATEGORY_REFRESH_INTERVAL_MS = 120000;
 const BACKGROUND_REFRESH_MIN_MS = 5000;
 const DOPE_DAY_RESET_UTC_HOUR = 3;
 const DOPE_DAY_RESET_UTC_MINUTE = 30;
+const REVIEWER_USERNAMES = new Set(["saket", "brainspoof"]);
 
 function storageRead(prefix, key, fallback = null) {
   try {
@@ -181,6 +182,7 @@ function showApp(keepLoading = false) {
   $("app-view").style.display = "block";
   $("user-name").textContent = state.user.display_name;
   $("user-color-dot").style.background = state.user.color || DEFAULT_COLOR;
+  $("review-nav").hidden = !isReviewer();
 }
 
 function setRouteLoading(loading) {
@@ -194,6 +196,10 @@ function updateAuthMode() {
   $("auth-display").required = signup;
   $("auth-submit").textContent = signup ? "Create account" : "Sign in";
   $("auth-toggle").textContent = signup ? "Already have an account" : "Create an account";
+}
+
+function isReviewer() {
+  return state.user && REVIEWER_USERNAMES.has(String(state.user.username || "").trim().toLowerCase());
 }
 
 async function init() {
@@ -239,7 +245,8 @@ async function loadRoute() {
   if (state.booted) setRouteLoading(true);
   try {
     state.route = location.hash.replace("#", "") || "active";
-    if (!["active", "completed", "archived", "diagnostics"].includes(state.route)) state.route = "active";
+    if (!["active", "review", "completed", "archived", "diagnostics"].includes(state.route)) state.route = "active";
+    if (state.route === "review" && !isReviewer()) state.route = "active";
     const isDiagnostics = state.route === "diagnostics";
     $("board-shell").hidden = isDiagnostics;
     $("diagnostics-page").hidden = !isDiagnostics;
@@ -251,10 +258,11 @@ async function loadRoute() {
     }
     clearInterval(state.diagTimer);
     const isActive = state.route === "active";
+    const isReview = state.route === "review";
     document.querySelectorAll(".nav-links a").forEach((a) => a.classList.toggle("active", a.dataset.route === state.route));
-    $("page-title").textContent = isActive ? "Active Dopes" : state.route === "completed" ? "Completed Dopes" : "Archived Dopes";
+    $("page-title").textContent = isActive ? "Active Dopes" : isReview ? "Review Dopes" : state.route === "completed" ? "Completed Dopes" : "Archived Dopes";
     $("page-title").classList.toggle("compact-title", isActive);
-    $("page-subtitle").textContent = state.route === "active" ? "Product work waiting to be amended." : state.route === "completed" ? "Work closed with commit links." : "Dopes moved out of the main queue.";
+    $("page-subtitle").textContent = state.route === "active" ? "Product work waiting to be amended." : isReview ? "Work waiting for Saket or Brainspoof to review." : state.route === "completed" ? "Work closed with commit links." : "Dopes moved out of the main queue.";
     $("page-subtitle").hidden = isActive;
     $("progress-panel").hidden = !isActive;
     $("new-dope").style.display = isActive ? "inline-flex" : "none";
@@ -481,7 +489,7 @@ function render() {
   const items = filteredDopes();
   const assigned = items.filter((d) => d.status === "active" && d.assigned_to);
   $("active-assigned").innerHTML = assigned.length ? assigned.map(card).join("") : `<p class="empty">No one is working on a dope right now.</p>`;
-  $("list-heading").textContent = state.route === "active" ? "Open Dopes" : state.route === "completed" ? "Completed List" : "Archive";
+  $("list-heading").textContent = state.route === "active" ? "Open Dopes" : state.route === "review" ? "Review Queue" : state.route === "completed" ? "Completed List" : "Archive";
   $("dope-list").innerHTML = items.map(card).join("");
   $("empty").hidden = items.length !== 0;
   document.querySelectorAll("[data-dope]").forEach((el) => {
@@ -1194,8 +1202,8 @@ async function openDope(id) {
       ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="assign" class="primary-wide" value="default"><i class="ph ph-target"></i>I'll take it</button>` : ""}
       ${d.status === "active" && !blocked ? `<button id="send-review" class="secondary action-text" value="default"><i class="ph ph-git-branch"></i>Send for Review</button>` : ""}
       ${d.status === "active" && !blocked ? `<button id="complete" class="${d.assigned_to ? "primary-wide" : "secondary action-text"}" value="default"><i class="ph ph-confetti"></i>Doped</button>` : ""}
-      ${d.status === "review" ? `<button id="reject-review" class="danger action-text" value="default"><i class="ph ph-x-circle"></i>Reject</button>` : ""}
-      ${d.status === "review" ? `<button id="approve-review" class="primary-wide" value="default"><i class="ph ph-check-circle"></i>Doped</button>` : ""}
+      ${d.status === "review" && isReviewer() ? `<button id="reject-review" class="danger action-text" value="default"><i class="ph ph-x-circle"></i>Reject</button>` : ""}
+      ${d.status === "review" && isReviewer() ? `<button id="approve-review" class="primary-wide" value="default"><i class="ph ph-check-circle"></i>Doped</button>` : ""}
       ${d.status === "completed" ? `<button id="uncomplete" class="secondary action-text" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Mark Not Completed</button>` : ""}
     </div>
   `;
