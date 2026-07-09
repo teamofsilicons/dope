@@ -104,6 +104,8 @@ h2 { margin: 34px 0 14px; font-size: 13px; letter-spacing: 0.14em; text-transfor
 .dope-card.has-accent { border-left: 4px solid var(--accent); padding-left: 15px; }
 .dope-card:hover { border-color: var(--fg); box-shadow: 0 18px 44px -34px rgba(0,0,0,0.5); }
 .dope-card.has-accent:hover { border-left-color: var(--accent); }
+.dope-card.is-review { border-color: #2a6f9e; }
+.dope-card.is-review-change { border-color: #9a4d42; background: var(--bg-2); }
 .card-main { display: grid; gap: 8px; min-width: 0; }
 .card-main h3 { margin: 0; }
 .card-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -114,6 +116,7 @@ h2 { margin: 34px 0 14px; font-size: 13px; letter-spacing: 0.14em; text-transfor
 .meta { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; color: var(--fg-muted); font-size: 13px; line-height: 1.4; }
 .card-pills { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 .pill { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border-soft); background: var(--bg-3); padding: 4px 8px; color: var(--fg-muted); font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+.review-pill { border-color: #2a6f9e; color: #2a6f9e; }
 .compact .dope-card { background: var(--bg-2); }
 .empty { border: 1px dashed var(--border); padding: 28px; text-align: center; color: var(--fg-muted); }
 .empty.mini { padding: 18px; margin: 0; }
@@ -216,6 +219,18 @@ dialog::backdrop { background: rgba(26,26,26,0.42); backdrop-filter: blur(4px); 
 .completion-notes h2 { margin: 0 0 10px; font-size: 11px; letter-spacing: 0.12em; color: var(--fg-dim); font-family: var(--font-mono); text-transform: uppercase; }
 .completion-text { border: 1px solid var(--border); background: var(--bg-3); padding: 14px; color: var(--fg-muted); font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .completion-text a { color: var(--blue); font-weight: 800; }
+.review-block { margin: 24px 0 0; }
+.review-block h2 { margin: 0 0 10px; font-size: 11px; letter-spacing: 0.12em; color: var(--fg-dim); font-family: var(--font-mono); text-transform: uppercase; }
+.review-panel { display: grid; gap: 10px; border: 1px solid var(--border); background: var(--bg-3); padding: 14px; }
+.review-row { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px; align-items: baseline; font-size: 13px; }
+.review-row span { color: var(--fg-dim); font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; }
+.review-row strong, .review-row a { min-width: 0; overflow-wrap: anywhere; }
+.review-row a { color: var(--blue); font-weight: 800; }
+.review-note { border-top: 1px solid var(--border-soft); padding-top: 10px; color: var(--fg-muted); font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-note.is-rejection { color: var(--fg); }
+.review-outcome { display: flex; align-items: center; gap: 7px; border: 1px solid var(--border-soft); background: var(--bg); padding: 9px 10px; font-size: 13px; font-weight: 800; }
+.review-outcome.is-approved { color: #2e8b57; }
+.review-outcome.is-rejected { color: #9a4d42; }
 .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 100; background: var(--fg); color: var(--bg); padding: 12px 14px; font-weight: 800; box-shadow: 0 18px 54px -28px rgba(0,0,0,0.6); max-width: calc(100% - 24px); }
 .undo { margin-left: 10px; min-height: 30px; padding: 0 10px; border-color: var(--bg); color: var(--bg); background: transparent; }
 .dope-celebration { position: fixed; inset: 0; z-index: 50; pointer-events: none; display: grid; place-items: center; overflow: hidden; background: rgba(26,26,26,0.08); animation: celebration-fade 1.8s ease forwards; }

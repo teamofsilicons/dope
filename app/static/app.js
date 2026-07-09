@@ -561,17 +561,23 @@ function commentBadge(d) {
 }
 
 function card(d) {
-  const status = d.status === "completed" ? `Completed by ${escapeHtml(d.completed_by?.display_name || "someone")} on ${localDate(d.completed_at)}` :
+  const review = d.review || {};
+  const status = d.status === "review" ? `In review from ${escapeHtml(d.completed_by?.display_name || "someone")} on ${localDate(d.completed_at)}` :
+    d.status === "completed" && review.rejected_at ? `Review rejected by ${escapeHtml(review.rejected_by?.display_name || "someone")}` :
+    d.status === "completed" ? `Completed by ${escapeHtml(d.completed_by?.display_name || "someone")} on ${localDate(d.completed_at)}` :
     d.status === "archived" ? `Archived ${localDate(d.archived_at)}` :
+    review.parent_id ? `Review changes${d.assigned_to ? ` assigned to ${escapeHtml(d.assigned_to.display_name)}` : ""}` :
     d.assigned_to ? `Claimed by ${escapeHtml(d.assigned_to.display_name)}` : "";
   const blocked = d.status === "active" && (d.blocked_dependencies || []).length > 0;
   const cat = d.category;
   const accent = cat ? ` style="--accent:${escapeHtml(cat.color)}"` : "";
-  return `<button class="dope-card ${blocked ? "is-blocked" : ""} ${cat ? "has-accent" : ""}" data-dope="${d.id}"${accent}>
+  return `<button class="dope-card ${blocked ? "is-blocked" : ""} ${d.status === "review" ? "is-review" : ""} ${review.parent_id ? "is-review-change" : ""} ${cat ? "has-accent" : ""}" data-dope="${d.id}"${accent}>
     <span class="card-main">
       <h3>${escapeHtml(d.title)}</h3>
       <span class="card-tags">
         ${cat ? categoryPill(cat) : ""}
+        ${d.status === "review" ? `<span class="pill review-pill"><i class="ph ph-git-branch"></i>Review</span>` : ""}
+        ${review.parent_id ? `<span class="pill review-pill"><i class="ph ph-arrow-bend-up-right"></i>Review changes</span>` : ""}
         ${status ? `<span class="meta"><span>${status}</span></span>` : ""}
       </span>
     </span>
@@ -1085,6 +1091,31 @@ async function openDope(id) {
       <div class="completion-text">${linkifyText(d.completion_description)}</div>
     </section>
   ` : "";
+  const review = d.review || {};
+  const reviewDetails = review.requested_at ? `
+    <section class="review-block">
+      <h2>Review</h2>
+      <div class="review-panel">
+        <div class="review-row">
+          <span>Sent by</span>
+          <strong>${escapeHtml(review.requested_by?.display_name || d.completed_by?.display_name || "someone")} on ${localDate(review.requested_at)}</strong>
+        </div>
+        ${review.branch_url ? `<div class="review-row"><span>Branch</span><a href="${escapeHtml(review.branch_url)}" target="_blank" rel="noreferrer">${escapeHtml(review.branch_url)}</a></div>` : ""}
+        ${review.note ? `<div class="review-note">${linkifyText(review.note)}</div>` : ""}
+        ${review.approved_at ? `<div class="review-outcome is-approved"><i class="ph ph-check-circle"></i>Approved by ${escapeHtml(review.approved_by?.display_name || "someone")} on ${localDate(review.approved_at)}</div>` : ""}
+        ${review.rejected_at ? `<div class="review-outcome is-rejected"><i class="ph ph-x-circle"></i>Rejected by ${escapeHtml(review.rejected_by?.display_name || "someone")} on ${localDate(review.rejected_at)}</div>` : ""}
+        ${review.rejection_note ? `<div class="review-note is-rejection">${linkifyText(review.rejection_note)}</div>` : ""}
+        ${review.followup_id ? `<button type="button" class="dependency-link is-undoped" data-review-open="${review.followup_id}" value="default"><span>Open review changes</span><small>#${review.followup_id}</small></button>` : ""}
+      </div>
+    </section>
+  ` : review.parent_id ? `
+    <section class="review-block">
+      <h2>Review changes</h2>
+      <div class="review-panel">
+        <button type="button" class="dependency-link" data-review-open="${review.parent_id}" value="default"><span>Original reviewed dope</span><small>#${review.parent_id}</small></button>
+      </div>
+    </section>
+  ` : "";
   const blocked = (d.blocked_dependencies || []).length > 0;
   const sortedDependencies = [...(d.dependencies || [])].sort((a, b) => {
     const aUndoped = a.status !== "completed";
@@ -1151,6 +1182,7 @@ async function openDope(id) {
       ${dependents}
       <div id="dope-version-description" class="description">${sanitizeHtml(activeVersion.description_html)}</div>
       ${completionNotes}
+      ${reviewDetails}
       ${history}
       ${commentsSectionHtml()}
     </div>
@@ -1160,7 +1192,10 @@ async function openDope(id) {
       ${d.status === "active" && d.assigned_to ? `<button id="unassign" class="non-cta" value="default"><i class="ph ph-user-minus"></i>Unassign Dope</button>` : ""}
       ${d.status === "active" && blocked ? `<button class="primary-wide" value="default" disabled><i class="ph ph-warning-circle"></i>Dependencies Undoped</button>` : ""}
       ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="assign" class="primary-wide" value="default"><i class="ph ph-target"></i>I'll take it</button>` : ""}
+      ${d.status === "active" && !blocked ? `<button id="send-review" class="secondary action-text" value="default"><i class="ph ph-git-branch"></i>Send for Review</button>` : ""}
       ${d.status === "active" && !blocked ? `<button id="complete" class="${d.assigned_to ? "primary-wide" : "secondary action-text"}" value="default"><i class="ph ph-confetti"></i>Doped</button>` : ""}
+      ${d.status === "review" ? `<button id="reject-review" class="danger action-text" value="default"><i class="ph ph-x-circle"></i>Reject</button>` : ""}
+      ${d.status === "review" ? `<button id="approve-review" class="primary-wide" value="default"><i class="ph ph-check-circle"></i>Doped</button>` : ""}
       ${d.status === "completed" ? `<button id="uncomplete" class="secondary action-text" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Mark Not Completed</button>` : ""}
     </div>
   `;
@@ -1174,6 +1209,12 @@ async function openDope(id) {
     el.onclick = (event) => {
       event.preventDefault();
       openDope(Number(el.dataset.dependentOpen));
+    };
+  });
+  document.querySelectorAll("[data-review-open]").forEach((el) => {
+    el.onclick = (event) => {
+      event.preventDefault();
+      openDope(Number(el.dataset.reviewOpen));
     };
   });
   const dependencySummary = $("dependency-summary");
@@ -1216,6 +1257,16 @@ function bindDopeActions(d) {
   if (unassign) unassign.onclick = (event) => { event.preventDefault(); openUnassignDope(d); };
   const complete = $("complete");
   if (complete) complete.onclick = (event) => { event.preventDefault(); openCompleteDope(d); };
+  const sendReview = $("send-review");
+  if (sendReview) sendReview.onclick = (event) => { event.preventDefault(); openReviewDope(d); };
+  const approveReview = $("approve-review");
+  if (approveReview) approveReview.onclick = async (event) => {
+    event.preventDefault();
+    await api(`/api/dopes/${d.id}/review/approve`, { method: "POST" });
+    await closeReload("Review approved");
+  };
+  const rejectReview = $("reject-review");
+  if (rejectReview) rejectReview.onclick = (event) => { event.preventDefault(); openRejectReview(d); };
   const uncomplete = $("uncomplete");
   if (uncomplete) uncomplete.onclick = async (event) => {
     event.preventDefault();
@@ -1372,6 +1423,71 @@ function openCompleteDope(d) {
       await loadRoute();
       celebrateDope();
       toast("Dope completed");
+    } catch (err) { toast(err.message); }
+  };
+}
+
+function openReviewDope(d) {
+  const draftKey = `review:${d.id}`;
+  const draft = draftRead(draftKey);
+  $("modal-title").hidden = true;
+  $("modal-title").textContent = "Send for Review";
+  $("modal-body").innerHTML = `
+    <div class="modal-topbar is-visible"><strong>Send for Review</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
+    <div class="modal-content">
+      <h2>${escapeHtml(d.title)}</h2>
+      <label>Reviewer note<textarea id="review-note" rows="8" placeholder="What should the reviewer check?">${escapeHtml(draft.note || "")}</textarea></label>
+      <label>Review branch link<input id="review-branch" name="dope_review_branch" autocomplete="off" placeholder="https://github.com/team/repo/tree/review-branch" value="${escapeHtml(draft.branch_url || "")}"></label>
+    </div>
+    <div class="modal-action-bar">
+      <button id="confirm-review" class="primary-wide" value="default"><i class="ph ph-git-branch"></i>Send for Review</button>
+    </div>
+  `;
+  bindDraftFields(draftKey, [["note", "review-note"], ["branch_url", "review-branch"]]);
+  $("confirm-review").onclick = async (event) => {
+    event.preventDefault();
+    try {
+      await api(`/api/dopes/${d.id}/review`, {
+        method: "POST",
+        body: JSON.stringify({ note: $("review-note").value, branch_url: $("review-branch").value }),
+      });
+      draftRemove(draftKey);
+      $("dope-dialog").close();
+      await loadRoute();
+      toast("Sent for review");
+    } catch (err) { toast(err.message); }
+  };
+}
+
+function openRejectReview(d) {
+  const draftKey = `reject-review:${d.id}`;
+  const draft = draftRead(draftKey);
+  $("modal-title").hidden = true;
+  $("modal-title").textContent = "Reject Review";
+  $("modal-body").innerHTML = `
+    <div class="modal-topbar is-visible"><strong>Reject Review</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
+    <div class="modal-content">
+      <h2>${escapeHtml(d.title)}</h2>
+      <label>Reviewer notes<textarea id="review-reject-note" rows="8" placeholder="What needs to change?">${escapeHtml(draft.note || "")}</textarea></label>
+      <label>Time required<input id="review-reject-time" name="dope_review_reject_time" autocomplete="off" placeholder="30min, 2hr" value="${escapeHtml(draft.time_text || "")}"></label>
+    </div>
+    <div class="modal-action-bar">
+      <button id="confirm-reject-review" class="primary-wide danger" value="default"><i class="ph ph-x-circle"></i>Create Review Changes</button>
+    </div>
+  `;
+  bindDraftFields(draftKey, [["note", "review-reject-note"], ["time_text", "review-reject-time"]]);
+  $("confirm-reject-review").onclick = async (event) => {
+    event.preventDefault();
+    try {
+      await api(`/api/dopes/${d.id}/review/reject`, {
+        method: "POST",
+        body: JSON.stringify({ note: $("review-reject-note").value, time_text: $("review-reject-time").value }),
+      });
+      draftRemove(draftKey);
+      $("dope-dialog").close();
+      if (location.hash !== "#active") location.hash = "active";
+      else await loadRoute();
+      toast("Review changes created");
     } catch (err) { toast(err.message); }
   };
 }
@@ -1600,6 +1716,7 @@ const ACTIVITY_META = {
   assigned: { icon: "ph-target", verb: "started" },
   unassigned: { icon: "ph-user-minus", verb: "stepped away from" },
   completed: { icon: "ph-confetti", verb: "doped" },
+  reviewed: { icon: "ph-git-branch", verb: "sent for review" },
   archived: { icon: "ph-archive", verb: "archived" },
   commented: { icon: "ph-chat-circle", verb: "commented on" },
   edited: { icon: "ph-pencil-simple", verb: "edited" },

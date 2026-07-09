@@ -3,12 +3,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
 import secrets
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -62,12 +65,17 @@ def current_dope_day() -> date:
     return dope_day_for(datetime.now(timezone.utc))
 
 
-def db() -> sqlite3.Connection:
+@contextmanager
+def db() -> Iterator[sqlite3.Connection]:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
@@ -95,6 +103,18 @@ def init_db() -> None:
               completed_by INTEGER REFERENCES users(id),
               completed_at TEXT,
               completion_description TEXT,
+              review_requested_by INTEGER REFERENCES users(id),
+              review_requested_at TEXT,
+              review_note TEXT,
+              review_branch_url TEXT,
+              review_approved_by INTEGER REFERENCES users(id),
+              review_approved_at TEXT,
+              review_rejected_by INTEGER REFERENCES users(id),
+              review_rejected_at TEXT,
+              review_rejection_note TEXT,
+              review_followup_id INTEGER REFERENCES dopes(id),
+              review_parent_id INTEGER REFERENCES dopes(id),
+              review_priority INTEGER NOT NULL DEFAULT 0,
               archived_by INTEGER REFERENCES users(id),
               archived_at TEXT
             );
@@ -206,6 +226,23 @@ def init_db() -> None:
         }
         if "category_id" not in dope_columns:
             conn.execute("ALTER TABLE dopes ADD COLUMN category_id INTEGER REFERENCES categories(id)")
+        review_columns = {
+            "review_requested_by": "INTEGER REFERENCES users(id)",
+            "review_requested_at": "TEXT",
+            "review_note": "TEXT",
+            "review_branch_url": "TEXT",
+            "review_approved_by": "INTEGER REFERENCES users(id)",
+            "review_approved_at": "TEXT",
+            "review_rejected_by": "INTEGER REFERENCES users(id)",
+            "review_rejected_at": "TEXT",
+            "review_rejection_note": "TEXT",
+            "review_followup_id": "INTEGER REFERENCES dopes(id)",
+            "review_parent_id": "INTEGER REFERENCES dopes(id)",
+            "review_priority": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in review_columns.items():
+            if name not in dope_columns:
+                conn.execute(f"ALTER TABLE dopes ADD COLUMN {name} {definition}")
         if not conn.execute("SELECT 1 FROM categories LIMIT 1").fetchone():
             seed_categories = [
                 ("Silicon Centered", "#2e6f8e"),
@@ -350,6 +387,16 @@ class CompleteIn(BaseModel):
     completion_description: str = Field(default="", max_length=20_000)
 
 
+class ReviewRequestIn(BaseModel):
+    note: str = Field(min_length=1, max_length=30_000)
+    branch_url: str = Field(min_length=1, max_length=2000)
+
+
+class ReviewRejectIn(BaseModel):
+    note: str = Field(min_length=1, max_length=30_000)
+    time_text: str = Field(min_length=1, max_length=40)
+
+
 class ProfileIn(BaseModel):
     display_name: str = Field(min_length=1, max_length=120)
     color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
@@ -400,9 +447,18 @@ def extract_http_links(value: str) -> list[str]:
     return links
 
 
+def validate_http_url(value: str, label: str) -> str:
+    url = value.strip()
+    if not re.match(r"^https?://", url):
+        raise HTTPException(status_code=400, detail=f"{label} must start with http:// or https://")
+    return url
+
+
 def status_for(row: sqlite3.Row) -> str:
     if row["archived_at"]:
         return "archived"
+    if row["completed_at"] and row["review_requested_at"] and not row["review_approved_at"] and not row["review_rejected_at"]:
+        return "review"
     if row["completed_at"]:
         return "completed"
     return "active"
@@ -677,16 +733,26 @@ def mark_comments_read(conn: sqlite3.Connection, dope_id: int, user_id: int, rea
 
 
 def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection, viewer_id: int | None = None) -> dict[str, Any]:
+    user_ids = sorted(
+        {
+            row[field]
+            for field in [
+                "created_by",
+                "assigned_to",
+                "completed_by",
+                "archived_by",
+                "review_requested_by",
+                "review_approved_by",
+                "review_rejected_by",
+            ]
+            if row[field] is not None
+        }
+    )
+    placeholders = ", ".join("?" for _ in user_ids)
     users = {
         u["id"]: u
-        for u in conn.execute(
-            """
-            SELECT DISTINCT users.* FROM users
-            WHERE id IN (?, ?, ?, ?)
-            """,
-            (row["created_by"], row["assigned_to"], row["completed_by"], row["archived_by"]),
-        ).fetchall()
-    }
+        for u in conn.execute(f"SELECT * FROM users WHERE id IN ({placeholders})", user_ids).fetchall()
+    } if user_ids else {}
     history = conn.execute(
         "SELECT * FROM assignment_history WHERE dope_id = ? ORDER BY assigned_at DESC, id DESC",
         (row["id"],),
@@ -734,6 +800,20 @@ def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection, viewer_id: int | No
         "completion_description": row["completion_description"] or "",
         "archived_at": row["archived_at"],
         "status": status_for(row),
+        "review": {
+            "requested_by": user_public(users.get(row["review_requested_by"])),
+            "requested_at": row["review_requested_at"],
+            "note": row["review_note"] or "",
+            "branch_url": row["review_branch_url"] or "",
+            "approved_by": user_public(users.get(row["review_approved_by"])),
+            "approved_at": row["review_approved_at"],
+            "rejected_by": user_public(users.get(row["review_rejected_by"])),
+            "rejected_at": row["review_rejected_at"],
+            "rejection_note": row["review_rejection_note"] or "",
+            "followup_id": row["review_followup_id"],
+            "parent_id": row["review_parent_id"],
+            "priority": int(row["review_priority"] or 0),
+        },
         "created_by": user_public(users.get(row["created_by"])),
         "assigned_to": user_public(users.get(row["assigned_to"])),
         "completed_by": user_public(users.get(row["completed_by"])),
@@ -979,6 +1059,7 @@ def list_dopes(
     where = {
         "active": "archived_at IS NULL AND completed_at IS NULL",
         "completed": "archived_at IS NULL AND completed_at IS NOT NULL",
+        "review": "archived_at IS NULL AND completed_at IS NOT NULL AND review_requested_at IS NOT NULL AND review_approved_at IS NULL AND review_rejected_at IS NULL",
         "archived": "archived_at IS NOT NULL",
         "all": "1 = 1",
     }.get(status)
@@ -987,6 +1068,7 @@ def list_dopes(
     if status == "active":
         order = """
         CASE
+          WHEN review_priority > 0 THEN -1
           WHEN (
             SELECT COUNT(*)
             FROM dope_dependencies dd
@@ -1005,6 +1087,7 @@ def list_dopes(
           ELSE 2
         END,
         CASE
+          WHEN review_priority > 0 THEN -review_priority
           WHEN (
             SELECT COUNT(*)
             FROM dope_dependencies dd
@@ -1039,12 +1122,25 @@ def list_dopes(
         id DESC
         """
     else:
-        order = "completed_at DESC, id DESC" if status == "completed" else "id DESC"
+        order = """
+        CASE
+          WHEN completed_at IS NOT NULL
+           AND review_requested_at IS NOT NULL
+           AND review_approved_at IS NULL
+           AND review_rejected_at IS NULL THEN 0
+          ELSE 1
+        END,
+        completed_at DESC,
+        id DESC
+        """ if status in {"completed", "review"} else "id DESC"
     with db() as conn:
         rows = conn.execute(f"SELECT * FROM dopes WHERE {where} ORDER BY {order}").fetchall()
         payloads = [dope_payload(row, conn, user["id"]) for row in rows]
     if status == "active":
         def active_sort_key(item: dict[str, Any]) -> tuple[int, int, str, int]:
+            review_priority = int((item.get("review") or {}).get("priority") or 0)
+            if review_priority:
+                return (-1, -review_priority, item["title"].lower(), -int(item["id"]))
             dependency_count = len([dep for dep in item["dependencies"] if dep["status"] != "archived"])
             if item["dependent_count"]:
                 return (0, -int(item["dependent_count"]), item["title"].lower(), -int(item["id"]))
@@ -1236,10 +1332,7 @@ def complete_dope(
     raw_links = extract_http_links(completion_text) if data.completion_text is not None else data.commit_links
     clean_links = []
     for link in raw_links:
-        url = link.strip()
-        if not re.match(r"^https?://", url):
-            raise HTTPException(status_code=400, detail="Commit links must start with http:// or https://")
-        clean_links.append(url)
+        clean_links.append(validate_http_url(link, "Commit links"))
     if not clean_links:
         raise HTTPException(status_code=400, detail="Add at least one commit link")
     completed_at = now_iso()
@@ -1271,6 +1364,157 @@ def complete_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
+@app.post("/api/dopes/{dope_id}/review")
+def send_dope_for_review(
+    dope_id: int,
+    data: ReviewRequestIn,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user = current_user(user_cookie, authorization)
+    review_note = data.note.strip()
+    if not review_note:
+        raise HTTPException(status_code=400, detail="Reviewer note is required")
+    branch_url = validate_http_url(data.branch_url, "Review branch link")
+    completed_at = now_iso()
+    with db() as conn:
+        row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
+        if not row or row["archived_at"] or row["completed_at"]:
+            raise HTTPException(status_code=404, detail="Active dope not found")
+        if incomplete_dependency_rows(conn, dope_id):
+            raise HTTPException(status_code=400, detail="Dependencies Undoped")
+        conn.execute(
+            """
+            UPDATE dopes
+            SET completed_by = ?,
+                completed_at = ?,
+                completion_description = ?,
+                assigned_to = NULL,
+                assigned_at = NULL,
+                review_requested_by = ?,
+                review_requested_at = ?,
+                review_note = ?,
+                review_branch_url = ?,
+                review_approved_by = NULL,
+                review_approved_at = NULL,
+                review_rejected_by = NULL,
+                review_rejected_at = NULL,
+                review_rejection_note = NULL,
+                review_followup_id = NULL
+            WHERE id = ?
+            """,
+            (user["id"], completed_at, review_note, user["id"], completed_at, review_note, branch_url, dope_id),
+        )
+        conn.execute(
+            """
+            UPDATE assignment_history SET unassigned_at = COALESCE(unassigned_at, ?)
+            WHERE dope_id = ? AND unassigned_at IS NULL
+            """,
+            (completed_at, dope_id),
+        )
+        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
+
+
+@app.post("/api/dopes/{dope_id}/review/approve")
+def approve_dope_review(
+    dope_id: int,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user = current_user(user_cookie, authorization)
+    approved_at = now_iso()
+    with db() as conn:
+        row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
+        if not row or status_for(row) != "review":
+            raise HTTPException(status_code=404, detail="Pending review dope not found")
+        conn.execute(
+            "UPDATE dopes SET review_approved_by = ?, review_approved_at = ? WHERE id = ?",
+            (user["id"], approved_at, dope_id),
+        )
+        return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
+
+
+@app.post("/api/dopes/{dope_id}/review/reject")
+def reject_dope_review(
+    dope_id: int,
+    data: ReviewRejectIn,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user = current_user(user_cookie, authorization)
+    rejection_note = data.note.strip()
+    if not rejection_note:
+        raise HTTPException(status_code=400, detail="Reviewer notes are required")
+    minutes = parse_time_to_minutes(data.time_text)
+    rejected_at = now_iso()
+    with db() as conn:
+        row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
+        if not row or status_for(row) != "review":
+            raise HTTPException(status_code=404, detail="Pending review dope not found")
+        owner_id = row["completed_by"]
+        if owner_id is None:
+            last_assignment = conn.execute(
+                "SELECT user_id FROM assignment_history WHERE dope_id = ? ORDER BY id DESC LIMIT 1",
+                (dope_id,),
+            ).fetchone()
+            owner_id = last_assignment["user_id"] if last_assignment else row["created_by"]
+        owner = conn.execute("SELECT * FROM users WHERE id = ?", (owner_id,)).fetchone()
+        if not owner:
+            raise HTTPException(status_code=400, detail="Review owner not found")
+        branch_url = row["review_branch_url"] or ""
+        note_html = html.escape(rejection_note).replace("\n", "<br>")
+        title_html = html.escape(row["title"])
+        branch_html = html.escape(branch_url)
+        description_html = (
+            f"<p><strong>Review changes for:</strong> {title_html}</p>"
+            f"<p><strong>Reviewer notes:</strong><br>{note_html}</p>"
+            f"<p><strong>Review branch:</strong> <a href=\"{branch_html}\">{branch_html}</a></p>"
+        )
+        cur = conn.execute(
+            """
+            INSERT INTO dopes (
+              title, description_html, time_minutes, created_by, created_at,
+              assigned_to, assigned_at, category_id, review_parent_id, review_priority
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"Review changes: {row['title']}",
+                description_html,
+                minutes,
+                user["id"],
+                rejected_at,
+                owner_id,
+                rejected_at,
+                row["category_id"],
+                dope_id,
+                1,
+            ),
+        )
+        followup_id = int(cur.lastrowid)
+        set_dope_dependencies(conn, followup_id, [dope_id])
+        add_dope_version(conn, followup_id, f"Review changes: {row['title']}", description_html, user["id"], rejected_at)
+        conn.execute(
+            "INSERT INTO assignment_history (dope_id, user_id, display_name, assigned_at) VALUES (?, ?, ?, ?)",
+            (followup_id, owner_id, owner["display_name"], rejected_at),
+        )
+        conn.execute(
+            """
+            UPDATE dopes
+            SET review_rejected_by = ?,
+                review_rejected_at = ?,
+                review_rejection_note = ?,
+                review_followup_id = ?
+            WHERE id = ?
+            """,
+            (user["id"], rejected_at, rejection_note, followup_id, dope_id),
+        )
+        return {
+            "reviewed": dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"]),
+            "followup": dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (followup_id,)).fetchone(), conn, user["id"]),
+        }
+
+
 @app.post("/api/dopes/{dope_id}/uncomplete")
 def uncomplete_dope(
     dope_id: int,
@@ -1282,6 +1526,8 @@ def uncomplete_dope(
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or row["archived_at"] or not row["completed_at"]:
             raise HTTPException(status_code=404, detail="Completed dope not found")
+        if row["review_followup_id"]:
+            raise HTTPException(status_code=400, detail="Review has follow-up changes")
         reopened_assignment = conn.execute(
             """
             SELECT id, user_id, assigned_at
@@ -1297,6 +1543,16 @@ def uncomplete_dope(
             SET completed_by = NULL,
                 completed_at = NULL,
                 completion_description = NULL,
+                review_requested_by = NULL,
+                review_requested_at = NULL,
+                review_note = NULL,
+                review_branch_url = NULL,
+                review_approved_by = NULL,
+                review_approved_at = NULL,
+                review_rejected_by = NULL,
+                review_rejected_at = NULL,
+                review_rejection_note = NULL,
+                review_followup_id = NULL,
                 assigned_to = ?,
                 assigned_at = ?
             WHERE id = ?
@@ -1573,12 +1829,14 @@ def diagnostics(
         ):
             events.append(event("created", row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["id"], row["title"]))
         for row in conn.execute(
-            "SELECT d.id, d.title, d.completed_at AS at, u.id AS uid, u.username, u.display_name, u.color "
+            "SELECT d.id, d.title, d.completed_at AS at, d.review_requested_at, d.review_branch_url, "
+            "u.id AS uid, u.username, u.display_name, u.color "
             "FROM dopes d JOIN users u ON u.id = d.completed_by WHERE d.completed_at IS NOT NULL "
             "ORDER BY d.completed_at DESC LIMIT ?",
             (limit,),
         ):
-            events.append(event("completed", row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["id"], row["title"]))
+            kind = "reviewed" if row["review_requested_at"] else "completed"
+            events.append(event(kind, row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["id"], row["title"], row["review_branch_url"] if kind == "reviewed" else None))
         for row in conn.execute(
             "SELECT d.id, d.title, d.archived_at AS at, u.id AS uid, u.username, u.display_name, u.color "
             "FROM dopes d JOIN users u ON u.id = d.archived_by WHERE d.archived_at IS NOT NULL "
