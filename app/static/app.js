@@ -1197,16 +1197,19 @@ async function openDope(id) {
       ${commentsSectionHtml()}
     </div>
     <div class="modal-action-bar">
-      ${d.status !== "archived" ? `<button id="edit-dope" class="icon-action secondary" value="default" title="Edit"><i class="ph ph-pencil-simple"></i></button>` : ""}
-      ${d.status !== "archived" ? `<button id="archive" class="icon-action danger" value="default" title="Archive"><i class="ph ph-archive"></i></button>` : `<button id="restore" class="secondary" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Restore</button>`}
-      ${d.status === "active" && d.assigned_to ? `<button id="unassign" class="non-cta" value="default"><i class="ph ph-user-minus"></i>Unassign Dope</button>` : ""}
       ${d.status === "active" && blocked ? `<button class="primary-wide" value="default" disabled><i class="ph ph-warning-circle"></i>Dependencies Undoped</button>` : ""}
       ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="assign" class="primary-wide" value="default"><i class="ph ph-target"></i>I'll take it</button>` : ""}
-      ${d.status === "active" && !blocked ? `<button id="send-review" class="secondary action-text" value="default"><i class="ph ph-git-branch"></i>Send for Review</button>` : ""}
-      ${d.status === "active" && !blocked ? `<button id="complete" class="${d.assigned_to ? "primary-wide" : "secondary action-text"}" value="default"><i class="ph ph-confetti"></i>Doped</button>` : ""}
-      ${d.status === "review" && isReviewer() ? `<button id="reject-review" class="danger action-text" value="default"><i class="ph ph-x-circle"></i>Reject</button>` : ""}
+      ${d.status === "active" && !blocked && d.assigned_to ? `<button id="complete" class="primary-wide" value="default"><i class="ph ph-confetti"></i>Doped</button>` : ""}
       ${d.status === "review" && isReviewer() ? `<button id="approve-review" class="primary-wide" value="default"><i class="ph ph-check-circle"></i>Doped</button>` : ""}
-      ${d.status === "completed" ? `<button id="uncomplete" class="secondary action-text" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Mark Not Completed</button>` : ""}
+      <div class="modal-action-row">
+        ${d.status !== "archived" ? `<button id="edit-dope" class="icon-action secondary" value="default" title="Edit"><i class="ph ph-pencil-simple"></i></button>` : ""}
+        ${d.status !== "archived" ? `<button id="archive" class="icon-action danger" value="default" title="Archive"><i class="ph ph-archive"></i></button>` : `<button id="restore" class="secondary" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Restore</button>`}
+        ${d.status === "active" && d.assigned_to ? `<button id="unassign" class="non-cta" value="default"><i class="ph ph-user-minus"></i>Unassign Dope</button>` : ""}
+        ${d.status === "active" && !blocked ? `<button id="send-review" class="secondary action-text" value="default"><i class="ph ph-git-branch"></i>Send for Review</button>` : ""}
+        ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="complete" class="secondary action-text" value="default"><i class="ph ph-confetti"></i>Doped</button>` : ""}
+        ${d.status === "review" && isReviewer() ? `<button id="reject-review" class="danger action-text" value="default"><i class="ph ph-x-circle"></i>Reject</button>` : ""}
+        ${d.status === "completed" ? `<button id="uncomplete" class="secondary action-text" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Mark Not Completed</button>` : ""}
+      </div>
     </div>
   `;
   document.querySelectorAll("[data-dependency-open]").forEach((el) => {
