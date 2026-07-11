@@ -177,7 +177,7 @@ dialog::backdrop { background: rgba(26,26,26,0.42); backdrop-filter: blur(4px); 
 .modal-topbar.is-visible { border-bottom-color: var(--border); }
 .modal-topbar.is-visible strong { opacity: 1; }
 .modal-topbar .icon-close { position: static; float: none; flex: 0 0 auto; }
-.modal-action-bar { position: sticky; bottom: 0; z-index: 9; width: 100%; display: flex; flex-direction: column; align-items: stretch; gap: 10px; padding: 12px clamp(20px, 5vw, 32px); background: var(--bg); border-top: 1px solid var(--border); }
+.modal-action-bar { position: sticky; bottom: 0; z-index: 9; width: 100%; display: flex; flex-direction: column; align-items: stretch; gap: 10px; padding: 20px clamp(20px, 5vw, 32px); background: var(--bg); border-top: 1px solid var(--border); }
 .modal-action-row { display: flex; align-items: center; gap: 10px; }
 .icon-action { width: 42px; padding: 0; flex: 0 0 auto; }
 .action-text { flex: 1 1 auto; white-space: nowrap; }
