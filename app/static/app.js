@@ -2038,6 +2038,15 @@ $("search").oninput = render;
 $("search").onkeydown = (event) => {
   if (event.key === "Enter") event.preventDefault();
 };
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+  const dialog = document.querySelector("dialog[open]");
+  if (!dialog) return;
+  const primary = dialog.querySelector(".modal-action-bar .primary-wide:not([disabled])");
+  if (!primary) return;
+  event.preventDefault();
+  primary.click();
+});
 $("filter-open").onclick = async () => {
   await loadCategories();
   renderFilterCategories();

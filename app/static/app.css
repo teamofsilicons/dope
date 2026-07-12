@@ -182,7 +182,8 @@ dialog::backdrop { background: rgba(26,26,26,0.42); backdrop-filter: blur(4px); 
 .icon-action { width: 42px; padding: 0; flex: 0 0 auto; }
 .action-text { flex: 1 1 auto; white-space: nowrap; }
 .modal-action-row .non-cta { flex: 1 1 auto; }
-.primary-wide { width: 100%; }
+.primary-wide { width: 100%; min-height: 58px; font-size: 17px; }
+.modal-action-bar .primary-wide:not([disabled])::after { content: "cmd + enter"; opacity: 0.5; font-family: var(--font-mono); font-size: 11px; font-weight: 700; letter-spacing: 0.08em; margin-left: 8px; white-space: nowrap; }
 .non-cta { background: transparent; color: var(--fg); border-color: var(--border); white-space: nowrap; }
 .grid-two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .filter-check { display: flex !important; grid-template-columns: none !important; align-items: center; gap: 10px !important; width: 100%; padding: 12px; border: 1px solid var(--border); background: var(--bg-3); color: var(--fg) !important; margin: 0 0 14px !important; cursor: pointer; }
