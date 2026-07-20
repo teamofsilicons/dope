@@ -31,6 +31,7 @@ IST_OFFSET = timedelta(hours=5, minutes=30)
 DOPE_DAY_RESET = datetime_time(hour=9)
 REVIEWER_USERNAMES = {"saket", "brainspoof"}
 DELEGATED_COMPLETION_USERNAME = "saket"
+COMBINED_DOPE_DAYS = {date(2026, 7, 21): date(2026, 7, 20)}
 
 app = FastAPI(title="Dope")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
@@ -59,11 +60,22 @@ def dope_day_for(value: str | datetime) -> date:
     day = local.date()
     if local.time() < DOPE_DAY_RESET:
         day -= timedelta(days=1)
-    return day
+    return COMBINED_DOPE_DAYS.get(day, day)
 
 
 def current_dope_day() -> date:
     return dope_day_for(datetime.now(timezone.utc))
+
+
+def recent_dope_days(last_day: date, count: int) -> list[date]:
+    days: list[date] = []
+    cursor = last_day
+    while len(days) < count:
+        combined_day = COMBINED_DOPE_DAYS.get(cursor, cursor)
+        if combined_day not in days:
+            days.append(combined_day)
+        cursor -= timedelta(days=1)
+    return sorted(days)
 
 
 @contextmanager
@@ -1177,9 +1189,10 @@ def progress_stats(
         raise HTTPException(status_code=400, detail="Progress range must be 7, 14, or 30 days")
 
     today = current_dope_day()
-    first_day = today - timedelta(days=days - 1)
+    bucket_days = recent_dope_days(today, days)
+    first_day = bucket_days[0]
     start_utc = datetime.combine(first_day, DOPE_DAY_RESET, tzinfo=timezone.utc) - IST_OFFSET
-    buckets: dict[date, dict[int, dict[str, Any]]] = {first_day + timedelta(days=i): {} for i in range(days)}
+    buckets: dict[date, dict[int, dict[str, Any]]] = {day: {} for day in bucket_days}
 
     with db() as conn:
         rows = conn.execute(

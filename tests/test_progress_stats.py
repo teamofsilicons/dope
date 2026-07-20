@@ -25,6 +25,60 @@ def test_dope_day_resets_at_9am_ist(tmp_path, monkeypatch):
     assert main.dope_day_for("2026-05-24T03:30:00+00:00") == date(2026, 5, 24)
 
 
+def test_july_20_and_21_share_one_progress_day(tmp_path, monkeypatch):
+    main = load_main(tmp_path, monkeypatch)
+
+    assert main.dope_day_for("2026-07-20T03:30:00+00:00") == date(2026, 7, 20)
+    assert main.dope_day_for("2026-07-21T03:29:59+00:00") == date(2026, 7, 20)
+    assert main.dope_day_for("2026-07-21T03:30:00+00:00") == date(2026, 7, 20)
+    assert main.dope_day_for("2026-07-22T03:29:59+00:00") == date(2026, 7, 20)
+    assert main.dope_day_for("2026-07-22T03:30:00+00:00") == date(2026, 7, 22)
+    assert main.recent_dope_days(date(2026, 7, 22), 7) == [
+        date(2026, 7, 15),
+        date(2026, 7, 16),
+        date(2026, 7, 17),
+        date(2026, 7, 18),
+        date(2026, 7, 19),
+        date(2026, 7, 20),
+        date(2026, 7, 22),
+    ]
+
+
+def test_progress_stats_combines_july_20_and_21_minutes(tmp_path, monkeypatch):
+    main = load_main(tmp_path, monkeypatch)
+    monkeypatch.setattr(main, "current_dope_day", lambda: date(2026, 7, 22))
+
+    with TestClient(main.app) as client:
+        client.post(
+            "/api/auth/signup",
+            json={"username": "shubham", "password": "password", "display_name": "Shubham"},
+        )
+        client.post("/api/auth/login", json={"username": "shubham", "password": "password"})
+        with main.db() as conn:
+            user_id = conn.execute("SELECT id FROM users WHERE username = 'shubham'").fetchone()[0]
+            rows = [
+                (30, ist_time_to_utc_iso(main, date(2026, 7, 20), 10)),
+                (45, ist_time_to_utc_iso(main, date(2026, 7, 21), 10)),
+            ]
+            conn.executemany(
+                """
+                INSERT INTO dopes
+                  (title, description_html, time_minutes, created_by, created_at, completed_by, completed_at)
+                VALUES ('Combined day', '<p>Done</p>', ?, ?, ?, ?, ?)
+                """,
+                [(minutes, user_id, completed_at, user_id, completed_at) for minutes, completed_at in rows],
+            )
+
+        payload = client.get("/api/stats/progress?days=7").json()
+
+    assert len(payload) == 7
+    assert "2026-07-21" not in {day["date"] for day in payload}
+    combined = next(day for day in payload if day["date"] == "2026-07-20")
+    assert combined["total_minutes"] == 75
+    assert combined["stacks"][0]["minutes"] == 75
+    assert combined["stacks"][0]["count"] == 2
+
+
 def test_index_supports_head_for_deploy_checks(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
