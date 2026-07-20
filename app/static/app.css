@@ -133,6 +133,7 @@ dialog::backdrop { background: rgba(26,26,26,0.42); backdrop-filter: blur(4px); 
 .modal h2 { margin-top: 0; color: var(--fg); font-family: var(--font-sans); font-size: clamp(26px, 6vw, 38px); letter-spacing: -0.04em; text-transform: none; }
 .icon-close { position: sticky; top: 0; float: right; width: 36px; min-height: 36px; padding: 0; background: var(--bg); border-color: var(--border); color: var(--fg); z-index: 8; }
 .modal label { display: grid; gap: 7px; font-weight: 800; font-size: 13px; color: var(--fg-muted); margin-bottom: 14px; }
+.modal label[hidden] { display: none; }
 .editor { min-height: 190px; border: 1px solid var(--border); background: var(--bg-3); padding: 13px; outline: none; line-height: 1.6; overflow-wrap: anywhere; }
 .editor:empty::before { content: attr(data-placeholder); color: var(--fg-dim); }
 .editor img, .description img { max-width: 100%; display: block; margin: 12px 0; border: 1px solid var(--border); }

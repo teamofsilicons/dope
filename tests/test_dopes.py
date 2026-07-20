@@ -80,6 +80,49 @@ def test_completed_dope_can_be_marked_not_completed(tmp_path, monkeypatch):
         assert dope_id not in completed_ids
 
 
+def test_saket_can_complete_a_dope_for_another_user(tmp_path, monkeypatch):
+    main = load_main(tmp_path, monkeypatch)
+
+    with TestClient(main.app) as client:
+        signup(client, "shubham", "Shubham")
+        signup(client, "saket", "Saket")
+        login(client, "shubham")
+        created = client.post(
+            "/api/dopes",
+            json={
+                "title": "Delegated completion",
+                "description_html": "<p>Body</p>",
+                "time_text": "30min",
+                "dependency_ids": [],
+            },
+        ).json()
+
+        forbidden = client.post(
+            f"/api/dopes/{created['id']}/complete",
+            json={
+                "completion_text": "done https://github.com/team/repo/commit/first",
+                "completed_for_user_id": 2,
+            },
+        )
+        assert forbidden.status_code == 403
+
+        login(client, "saket")
+        completed = client.post(
+            f"/api/dopes/{created['id']}/complete",
+            json={
+                "completion_text": "done https://github.com/team/repo/commit/second",
+                "completed_for_user_id": 1,
+            },
+        )
+        assert completed.status_code == 200
+        assert completed.json()["completed_by"]["username"] == "shubham"
+
+        progress = client.get("/api/stats/progress?days=7").json()
+        today = next(day for day in progress if day["date"] == main.current_dope_day().isoformat())
+        assert today["stacks"][0]["display_name"] == "Shubham"
+        assert today["stacks"][0]["minutes"] == 30
+
+
 def test_dope_edit_can_update_time(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 

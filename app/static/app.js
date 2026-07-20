@@ -34,6 +34,7 @@ const BACKGROUND_REFRESH_MIN_MS = 5000;
 const DOPE_DAY_RESET_UTC_HOUR = 3;
 const DOPE_DAY_RESET_UTC_MINUTE = 30;
 const REVIEWER_USERNAMES = new Set(["saket", "brainspoof"]);
+const DELEGATED_COMPLETION_USERNAME = "saket";
 
 function storageRead(prefix, key, fallback = null) {
   try {
@@ -200,6 +201,10 @@ function updateAuthMode() {
 
 function isReviewer() {
   return state.user && REVIEWER_USERNAMES.has(String(state.user.username || "").trim().toLowerCase());
+}
+
+function canCompleteForOthers() {
+  return state.user && String(state.user.username || "").trim().toLowerCase() === DELEGATED_COMPLETION_USERNAME;
 }
 
 async function init() {
@@ -488,10 +493,11 @@ function render() {
   renderProgressChart();
   const items = filteredDopes();
   const assigned = items.filter((d) => d.status === "active" && d.assigned_to);
+  const listed = state.route === "active" ? items.filter((d) => !d.assigned_to) : items;
   $("active-assigned").innerHTML = assigned.length ? assigned.map(card).join("") : `<p class="empty">No one is working on a dope right now.</p>`;
   $("list-heading").textContent = state.route === "active" ? "Open Dopes" : state.route === "review" ? "Review Queue" : state.route === "completed" ? "Completed List" : "Archive";
-  $("dope-list").innerHTML = items.map(card).join("");
-  $("empty").hidden = items.length !== 0;
+  $("dope-list").innerHTML = listed.map(card).join("");
+  $("empty").hidden = listed.length !== 0;
   document.querySelectorAll("[data-dope]").forEach((el) => {
     el.onclick = () => openDope(Number(el.dataset.dope));
   });
@@ -1414,9 +1420,15 @@ async function openEditDope(d) {
   };
 }
 
-function openCompleteDope(d) {
+async function openCompleteDope(d) {
   const draftKey = `complete:${d.id}`;
   const draft = draftRead(draftKey);
+  const completionUsers = canCompleteForOthers()
+    ? (await loadUsers()).filter((user) => user.id !== state.user.id)
+    : [];
+  const completionUserOptions = completionUsers.map((user) =>
+    `<option value="${user.id}">${escapeHtml(user.display_name)} (@${escapeHtml(user.username)})</option>`
+  ).join("");
   $("modal-title").hidden = true;
   $("modal-title").textContent = "Doped";
   $("modal-body").innerHTML = `
@@ -1424,16 +1436,44 @@ function openCompleteDope(d) {
     <div class="modal-content">
       <h2>${escapeHtml(d.title)}</h2>
       <label>Doped description with commit links<textarea id="completion-text" rows="12" placeholder="Write what changed and include at least one commit link">${escapeHtml(draft.completion_text || "")}</textarea></label>
+      ${canCompleteForOthers() ? `
+        <label class="filter-check"><input id="complete-for-other" type="checkbox">Doped for someone else</label>
+        <label id="complete-for-user-wrap" hidden>Who is it for?
+          <select id="complete-for-user">
+            <option value="">Choose a person</option>
+            ${completionUserOptions}
+          </select>
+        </label>
+      ` : ""}
     </div>
     <div class="modal-action-bar">
       <button id="confirm-complete" class="primary-wide" value="default"><i class="ph ph-confetti"></i>Doped</button>
     </div>
   `;
   bindDraftFields(draftKey, [["completion_text", "completion-text"]]);
+  const completeForOther = $("complete-for-other");
+  const completeForUserWrap = $("complete-for-user-wrap");
+  if (completeForOther && completeForUserWrap) {
+    completeForOther.onchange = () => {
+      completeForUserWrap.hidden = !completeForOther.checked;
+      if (completeForOther.checked) $("complete-for-user").focus();
+    };
+  }
   $("confirm-complete").onclick = async (event) => {
     event.preventDefault();
     try {
-      await api(`/api/dopes/${d.id}/complete`, { method: "POST", body: JSON.stringify({ completion_text: $("completion-text").value }) });
+      const completedForUserId = completeForOther?.checked ? Number($("complete-for-user").value) : null;
+      if (completeForOther?.checked && !completedForUserId) {
+        toast("Choose who this dope is for");
+        return;
+      }
+      await api(`/api/dopes/${d.id}/complete`, {
+        method: "POST",
+        body: JSON.stringify({
+          completion_text: $("completion-text").value,
+          completed_for_user_id: completedForUserId,
+        }),
+      });
       draftRemove(draftKey);
       $("dope-dialog").close();
       await loadRoute();

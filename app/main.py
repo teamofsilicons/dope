@@ -30,6 +30,7 @@ SESSION_MAX_AGE = 60 * 60 * 24 * 30
 IST_OFFSET = timedelta(hours=5, minutes=30)
 DOPE_DAY_RESET = datetime_time(hour=9)
 REVIEWER_USERNAMES = {"saket", "brainspoof"}
+DELEGATED_COMPLETION_USERNAME = "saket"
 
 app = FastAPI(title="Dope")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
@@ -386,6 +387,7 @@ class CompleteIn(BaseModel):
     completion_text: str | None = Field(default=None, max_length=30_000)
     commit_links: list[str] = Field(default_factory=list, max_length=50)
     completion_description: str = Field(default="", max_length=20_000)
+    completed_for_user_id: int | None = Field(default=None, gt=0)
 
 
 class ReviewRequestIn(BaseModel):
@@ -1355,13 +1357,24 @@ def complete_dope(
             raise HTTPException(status_code=404, detail="Active dope not found")
         if incomplete_dependency_rows(conn, dope_id):
             raise HTTPException(status_code=400, detail="Dependencies Undoped")
+        completed_by_id = user["id"]
+        if data.completed_for_user_id is not None:
+            if str(user["username"]).strip().lower() != DELEGATED_COMPLETION_USERNAME:
+                raise HTTPException(status_code=403, detail="Only Saket can mark a dope for someone else")
+            completion_user = conn.execute(
+                "SELECT id FROM users WHERE id = ?",
+                (data.completed_for_user_id,),
+            ).fetchone()
+            if not completion_user:
+                raise HTTPException(status_code=400, detail="Completion user not found")
+            completed_by_id = completion_user["id"]
         conn.execute(
             """
             UPDATE dopes
             SET completed_by = ?, completed_at = ?, completion_description = ?, assigned_to = NULL, assigned_at = NULL
             WHERE id = ?
             """,
-            (user["id"], completed_at, completion_text, dope_id),
+            (completed_by_id, completed_at, completion_text, dope_id),
         )
         conn.executemany(
             "INSERT INTO commit_links (dope_id, url, created_at) VALUES (?, ?, ?)",

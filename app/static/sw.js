@@ -1,8 +1,8 @@
-const CACHE_NAME = "dope-shell-20260709-reviewers";
+const CACHE_NAME = "dope-shell-20260720-delegated-completion";
 const SHELL_ASSETS = [
   "/",
-  "/static/app.css?v=20260709-reviewers",
-  "/static/app.js?v=20260709-reviewers",
+  "/static/app.css?v=20260720-delegated-completion",
+  "/static/app.js?v=20260720-delegated-completion",
   "/static/si-logo-light.png",
 ];
 
