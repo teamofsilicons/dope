@@ -65,6 +65,7 @@ a { color: inherit; }
 .nav-links a.active { color: var(--fg); border-color: var(--border); background: var(--bg-2); }
 .user-chip { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12px; color: var(--fg-muted); min-width: 0; }
 .user-chip button { width: 36px; min-height: 36px; padding: 0; background: transparent; color: var(--fg); border-color: var(--border); }
+.user-chip button[hidden] { display: none; }
 .user-chip .profile-chip { width: auto; max-width: 180px; padding: 0 10px; gap: 7px; color: var(--fg-muted); }
 #user-color-dot { width: 12px; height: 12px; border: 1px solid var(--fg); display: inline-block; flex: 0 0 auto; }
 #user-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -125,9 +126,9 @@ dialog { border: 0; padding: 0; background: var(--bg); width: min(calc(100% - 24
 dialog::backdrop { background: rgba(26,26,26,0.42); backdrop-filter: blur(4px); }
 .modal { position: relative; isolation: isolate; background: var(--bg); border: 1px solid var(--border); padding: 0; max-height: min(88dvh, 820px); overflow: auto; box-shadow: 0 32px 100px -44px rgba(0,0,0,0.55); overscroll-behavior: contain; }
 .modal::before { content: ""; position: sticky; top: 0; display: block; height: 0; background: var(--bg); z-index: -1; }
-#filter-dialog, #profile-dialog, #categories-dialog { width: min(calc(100% - 24px), 480px); }
+#filter-dialog, #profile-dialog, #categories-dialog, #settings-dialog { width: min(calc(100% - 24px), 480px); }
 .modal.small { width: 100%; }
-#filter-dialog .modal, #profile-dialog .modal, #categories-dialog .modal { padding: clamp(20px, 5vw, 32px); }
+#filter-dialog .modal, #profile-dialog .modal, #categories-dialog .modal, #settings-dialog .modal { padding: clamp(20px, 5vw, 32px); }
 #dope-dialog .modal > .icon-close { display: none; }
 #dope-dialog #modal-title[hidden] { display: none; }
 .modal h2 { margin-top: 0; color: var(--fg); font-family: var(--font-sans); font-size: clamp(26px, 6vw, 38px); letter-spacing: -0.04em; text-transform: none; }
@@ -194,6 +195,16 @@ dialog::backdrop { background: rgba(26,26,26,0.42); backdrop-filter: blur(4px); 
 .profile-modal label { margin-bottom: 16px; }
 .profile-modal .modal-actions { margin-top: 22px; }
 .profile-modal .modal-actions button { width: 100%; }
+.settings-modal .kicker { margin: 0 0 8px; }
+.settings-modal h2 { font-size: clamp(34px, 9vw, 58px); margin: 0 0 22px; }
+.settings-modal .icon-close { margin: -10px -10px 0 12px; }
+.settings-modal .modal-actions { margin-top: 22px; }
+.settings-modal .modal-actions button { width: 100%; }
+.reset-countdown-card { display: grid; gap: 5px; margin: 0 0 18px; padding: 16px; border: 1px solid var(--fg); background: var(--bg-3); }
+.reset-countdown-card span { color: var(--fg-muted); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+.reset-countdown-card strong { font-family: var(--font-mono); font-size: clamp(27px, 8vw, 40px); letter-spacing: -0.05em; font-variant-numeric: tabular-nums; }
+.reset-countdown-card small { color: var(--fg-dim); font-family: var(--font-mono); font-size: 11px; }
+.settings-note { margin: 4px 0 0; padding: 12px; border-left: 3px solid var(--fg); background: var(--bg-3); color: var(--fg-muted); font-size: 12px; line-height: 1.55; }
 .color-field { display: grid; grid-template-columns: 58px 1fr; gap: 10px; align-items: center; }
 .color-field input[type="color"] { width: 58px; height: 50px; padding: 0; border: 1px solid var(--border); background: var(--bg-3); cursor: pointer; }
 .color-field input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }

@@ -40,6 +40,14 @@ Dope payloads from `GET /api/dopes` include `comment_count`,
 `unread_comments`, `unread_mentions`, and `latest_comment_at` for the caller,
 which power the new-message badges.
 
+### Settings
+
+- `GET /api/settings/dope-day` — Saket-only reset-time settings, including the
+  next reset and remaining seconds in IST.
+- `PUT /api/settings/dope-day` — Saket-only update with body
+  `{"reset_time": "09:00"}`. Each update re-buckets only completions from the
+  preceding 16 hours; older progress keeps its prior reset rule.
+
 ### Diagnostics
 
 - `GET /api/diagnostics?limit=50` — team-wide overview (in the UI it's a

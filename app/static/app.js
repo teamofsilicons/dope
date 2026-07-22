@@ -14,6 +14,8 @@ const state = {
   diag: null,
   diagWindow: "7d",
   diagTimer: null,
+  settingsTimer: null,
+  nextResetAt: null,
   boardTimer: null,
   dayTimer: null,
   boardRefreshInFlight: false,
@@ -184,6 +186,7 @@ function showApp(keepLoading = false) {
   $("user-name").textContent = state.user.display_name;
   $("user-color-dot").style.background = state.user.color || DEFAULT_COLOR;
   $("review-nav").hidden = !isReviewer();
+  $("settings-open").hidden = !canManageSettings();
 }
 
 function setRouteLoading(loading) {
@@ -205,6 +208,10 @@ function isReviewer() {
 
 function canCompleteForOthers() {
   return state.user && String(state.user.username || "").trim().toLowerCase() === DELEGATED_COMPLETION_USERNAME;
+}
+
+function canManageSettings() {
+  return state.user && String(state.user.username || "").trim().toLowerCase() === "saket";
 }
 
 async function init() {
@@ -308,6 +315,14 @@ async function loadRoute() {
 }
 
 function msUntilNextDopeDayReset(now = new Date()) {
+  if (state.nextResetAt) {
+    let resetAt = Date.parse(state.nextResetAt);
+    if (Number.isFinite(resetAt)) {
+      while (resetAt <= now.getTime()) resetAt += 24 * 60 * 60 * 1000;
+      state.nextResetAt = new Date(resetAt).toISOString();
+      return resetAt - now.getTime();
+    }
+  }
   const reset = new Date(now.getTime());
   reset.setUTCHours(DOPE_DAY_RESET_UTC_HOUR, DOPE_DAY_RESET_UTC_MINUTE, 0, 0);
   if (reset <= now) reset.setUTCDate(reset.getUTCDate() + 1);
@@ -1548,6 +1563,78 @@ function openRejectReview(d) {
   };
 }
 
+function formatResetCountdown(milliseconds) {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(hours).padStart(2, "0")}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+function startSettingsCountdown(nextResetAt) {
+  clearInterval(state.settingsTimer);
+  let resetAt = Date.parse(nextResetAt);
+  if (!Number.isFinite(resetAt)) return;
+  state.nextResetAt = new Date(resetAt).toISOString();
+  const tick = () => {
+    if (!$("settings-dialog").open) {
+      clearInterval(state.settingsTimer);
+      state.settingsTimer = null;
+      return;
+    }
+    const now = Date.now();
+    if (resetAt <= now) {
+      resetAt += 24 * 60 * 60 * 1000;
+      state.nextResetAt = new Date(resetAt).toISOString();
+      refreshVisibleData({ force: true });
+      scheduleDopeDayRefresh();
+    }
+    $("settings-reset-countdown").textContent = formatResetCountdown(resetAt - now);
+    $("settings-next-reset").textContent = `Resets ${new Date(resetAt).toLocaleString(undefined, {
+      timeZone: "Asia/Kolkata",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    })} IST`;
+  };
+  tick();
+  state.settingsTimer = setInterval(tick, 1000);
+}
+
+async function openSettings() {
+  if (!canManageSettings()) return;
+  $("settings-reset-countdown").textContent = "Loading…";
+  $("settings-next-reset").textContent = "Loading IST reset…";
+  $("settings-dialog").showModal();
+  try {
+    const settings = await api("/api/settings/dope-day");
+    $("settings-reset-time").value = settings.reset_time;
+    startSettingsCountdown(settings.next_reset_at);
+  } catch (err) {
+    $("settings-dialog").close();
+    toast(err.message);
+    return;
+  }
+  $("settings-save").onclick = async (event) => {
+    event.preventDefault();
+    try {
+      const settings = await api("/api/settings/dope-day", {
+        method: "PUT",
+        body: JSON.stringify({ reset_time: $("settings-reset-time").value }),
+      });
+      startSettingsCountdown(settings.next_reset_at);
+      scheduleDopeDayRefresh();
+      await loadRoute();
+      toast("Reset time saved");
+    } catch (err) { toast(err.message); }
+  };
+  $("settings-dialog").onclose = () => {
+    clearInterval(state.settingsTimer);
+    state.settingsTimer = null;
+  };
+}
+
 function syncProfileColorInputs(source) {
   const color = source === "hex" ? $("profile-color-hex").value : $("profile-color").value;
   if (!/^#[0-9a-fA-F]{6}$/.test(color)) return;
@@ -2069,10 +2156,14 @@ $("logout").onclick = async () => {
   stopAutoRefresh();
   clearInterval(state.diagTimer);
   state.diagTimer = null;
+  clearInterval(state.settingsTimer);
+  state.settingsTimer = null;
+  state.nextResetAt = null;
   state.user = null;
   showAuth();
 };
 $("profile-open").onclick = openProfile;
+$("settings-open").onclick = openSettings;
 $("new-dope").onclick = openNewDope;
 $("search").oninput = render;
 $("search").onkeydown = (event) => {

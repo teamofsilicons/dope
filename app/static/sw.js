@@ -1,8 +1,8 @@
-const CACHE_NAME = "dope-shell-20260720-delegated-completion";
+const CACHE_NAME = "dope-shell-20260723-reset-settings";
 const SHELL_ASSETS = [
   "/",
-  "/static/app.css?v=20260720-delegated-completion",
-  "/static/app.js?v=20260720-delegated-completion",
+  "/static/app.css?v=20260723-reset-settings",
+  "/static/app.js?v=20260723-reset-settings",
   "/static/si-logo-light.png",
 ];
 

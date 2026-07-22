@@ -11,9 +11,9 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2/src/regular/style.css">
-  <link rel="stylesheet" href="/static/app.css?v=20260720-delegated-completion">
+  <link rel="stylesheet" href="/static/app.css?v=20260723-reset-settings">
   <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
-  <script src="/static/app.js?v=20260720-delegated-completion" defer></script>
+  <script src="/static/app.js?v=20260723-reset-settings" defer></script>
 </head>
 <body>
   <div id="toast" class="toast" hidden></div>
@@ -61,6 +61,7 @@
       <div class="user-chip">
         <button id="diagnostics-open" title="Diagnostics"><i class="ph ph-pulse"></i></button>
         <button id="categories-open" title="Manage categories"><i class="ph ph-tag"></i></button>
+        <button id="settings-open" title="Settings" aria-label="Settings" hidden><i class="ph ph-gear"></i></button>
         <button id="profile-open" class="profile-chip" title="Profile"><span id="user-color-dot"></span><span id="user-name"></span></button>
         <button id="logout" title="Sign out"><i class="ph ph-sign-out"></i></button>
       </div>
@@ -192,6 +193,26 @@
           <button type="button" data-category-color="#1a1a1a" style="--swatch:#1a1a1a"></button>
         </div>
         <button id="category-add" class="primary-wide" type="button" value="default"><i class="ph ph-plus"></i>Add category</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog">
+    <form method="dialog" class="modal small settings-modal">
+      <button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button>
+      <p class="kicker">Saket only</p>
+      <h2>Settings</h2>
+      <section class="reset-countdown-card">
+        <span>Next dope-day reset in</span>
+        <strong id="settings-reset-countdown">--h --m --s</strong>
+        <small id="settings-next-reset">Loading IST reset…</small>
+      </section>
+      <label>Daily reset time (IST)
+        <input id="settings-reset-time" type="time" step="60" required>
+      </label>
+      <p class="settings-note">A change re-buckets only dopes completed during the previous 16 hours. Older progress history keeps the reset rule it already had.</p>
+      <div class="modal-actions">
+        <button id="settings-save" value="default"><i class="ph ph-floppy-disk"></i>Save settings</button>
       </div>
     </form>
   </dialog>

@@ -37,7 +37,7 @@ def test_july_20_and_21_share_one_progress_day(tmp_path, monkeypatch):
 
 def test_progress_stats_combines_july_20_and_21_minutes(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
-    monkeypatch.setattr(main, "current_dope_day", lambda: date(2026, 7, 22))
+    monkeypatch.setattr(main, "current_dope_day", lambda reset_time=None: date(2026, 7, 22))
 
     with TestClient(main.app) as client:
         client.post(
@@ -83,7 +83,7 @@ def test_index_supports_head_for_deploy_checks(tmp_path, monkeypatch):
 
 def test_progress_stats_groups_completed_hours_by_person(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
-    monkeypatch.setattr(main, "current_dope_day", lambda: date(2026, 6, 10))
+    monkeypatch.setattr(main, "current_dope_day", lambda reset_time=None: date(2026, 6, 10))
 
     with TestClient(main.app) as client:
         client.post(

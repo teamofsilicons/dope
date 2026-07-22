@@ -29,22 +29,29 @@ COOKIE_NAME = "dope_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30
 IST_OFFSET = timedelta(hours=5, minutes=30)
 DOPE_DAY_RESET = datetime_time(hour=9)
+DEFAULT_DOPE_DAY_RESET_MINUTES = 9 * 60
+RESET_RETROACTIVE_HOURS = 16
 REVIEWER_USERNAMES = {"saket", "brainspoof"}
 DELEGATED_COMPLETION_USERNAME = "saket"
+SETTINGS_USERNAME = "saket"
 COMBINED_DOPE_DAYS = {date(2026, 7, 20): date(2026, 7, 21)}
 
 app = FastAPI(title="Dope")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return utc_now().isoformat(timespec="seconds")
 
 
 def now_iso_precise() -> str:
     # Comments and read markers compare timestamps with >, so they need
     # sub-second precision to keep rapid back-and-forth unread-accurate.
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    return utc_now().isoformat(timespec="microseconds")
 
 
 def parse_iso_datetime(value: str) -> datetime:
@@ -54,17 +61,17 @@ def parse_iso_datetime(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def dope_day_for(value: str | datetime) -> date:
+def dope_day_for(value: str | datetime, reset_time: datetime_time = DOPE_DAY_RESET) -> date:
     parsed = parse_iso_datetime(value) if isinstance(value, str) else value.astimezone(timezone.utc)
     local = parsed + IST_OFFSET
     day = local.date()
-    if local.time() < DOPE_DAY_RESET:
+    if local.time() < reset_time:
         day -= timedelta(days=1)
     return COMBINED_DOPE_DAYS.get(day, day)
 
 
-def current_dope_day() -> date:
-    return dope_day_for(datetime.now(timezone.utc))
+def current_dope_day(reset_time: datetime_time = DOPE_DAY_RESET) -> date:
+    return dope_day_for(utc_now(), reset_time)
 
 
 @contextmanager
@@ -195,6 +202,14 @@ def init_db() -> None:
               user_id INTEGER NOT NULL REFERENCES users(id),
               last_read_at TEXT NOT NULL,
               PRIMARY KEY (dope_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS dope_day_reset_changes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              reset_minutes INTEGER NOT NULL CHECK (reset_minutes >= 0 AND reset_minutes < 1440),
+              changed_by INTEGER NOT NULL REFERENCES users(id),
+              changed_at TEXT NOT NULL,
+              retroactive_from TEXT NOT NULL
             );
             """
         )
@@ -423,6 +438,10 @@ class CommentIn(BaseModel):
     body: str = Field(min_length=1, max_length=10_000)
 
 
+class DopeDaySettingsIn(BaseModel):
+    reset_time: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
 def parse_time_to_minutes(value: str) -> int:
     text = value.strip().lower()
     token_re = re.compile(r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m)?")
@@ -481,6 +500,78 @@ def is_reviewer_user(row: sqlite3.Row | None) -> bool:
 def require_reviewer(user: sqlite3.Row) -> None:
     if not is_reviewer_user(user):
         raise HTTPException(status_code=403, detail="Review access is limited to Saket and Brainspoof")
+
+
+def require_settings_user(user: sqlite3.Row) -> None:
+    if str(user["username"]).strip().lower() != SETTINGS_USERNAME:
+        raise HTTPException(status_code=403, detail="Settings access is limited to Saket")
+
+
+def reset_time_from_minutes(minutes: int) -> datetime_time:
+    return datetime_time(hour=minutes // 60, minute=minutes % 60)
+
+
+def reset_time_text(minutes: int) -> str:
+    value = reset_time_from_minutes(minutes)
+    return f"{value.hour:02d}:{value.minute:02d}"
+
+
+def parse_reset_time(value: str) -> int:
+    text = value.strip()
+    match = re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", text)
+    if not match:
+        raise HTTPException(status_code=400, detail="Reset time must use HH:MM")
+    hour, minute = (int(part) for part in text.split(":"))
+    return hour * 60 + minute
+
+
+def load_reset_changes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT id, reset_minutes, changed_at, retroactive_from FROM dope_day_reset_changes ORDER BY changed_at, id"
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "reset_minutes": int(row["reset_minutes"]),
+            "changed_at": row["changed_at"],
+            "retroactive_from": parse_iso_datetime(row["retroactive_from"]),
+        }
+        for row in rows
+    ]
+
+
+def reset_minutes_for_completion(value: str | datetime, changes: list[dict[str, Any]]) -> int:
+    completed_at = parse_iso_datetime(value) if isinstance(value, str) else value.astimezone(timezone.utc)
+    reset_minutes = DEFAULT_DOPE_DAY_RESET_MINUTES
+    for change in changes:
+        if completed_at >= change["retroactive_from"]:
+            reset_minutes = int(change["reset_minutes"])
+    return reset_minutes
+
+
+def next_reset_at(reset_minutes: int, now: datetime | None = None) -> datetime:
+    current = (now or utc_now()).astimezone(timezone.utc)
+    local_now = current + IST_OFFSET
+    reset_time = reset_time_from_minutes(reset_minutes)
+    next_local = datetime.combine(local_now.date(), reset_time, tzinfo=timezone.utc)
+    if next_local <= local_now:
+        next_local += timedelta(days=1)
+    return next_local - IST_OFFSET
+
+
+def dope_day_settings_payload(row: sqlite3.Row | None, now: datetime | None = None) -> dict[str, Any]:
+    current = (now or utc_now()).astimezone(timezone.utc)
+    reset_minutes = int(row["reset_minutes"]) if row else DEFAULT_DOPE_DAY_RESET_MINUTES
+    next_reset = next_reset_at(reset_minutes, current)
+    return {
+        "reset_time": reset_time_text(reset_minutes),
+        "timezone": "IST",
+        "next_reset_at": next_reset.isoformat(timespec="seconds"),
+        "remaining_seconds": max(0, int((next_reset - current).total_seconds())),
+        "history_window_hours": RESET_RETROACTIVE_HOURS,
+        "changed_at": row["changed_at"] if row else None,
+        "retroactive_from": row["retroactive_from"] if row else None,
+    }
 
 
 def normalize_color(value: str | None, fallback: str = "#1a1a1a") -> str:
@@ -1167,6 +1258,56 @@ def list_dopes(
     return payloads
 
 
+@app.get("/api/settings/dope-day")
+def get_dope_day_settings(
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user = current_user(user_cookie, authorization)
+    require_settings_user(user)
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM dope_day_reset_changes ORDER BY changed_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+    return dope_day_settings_payload(row)
+
+
+@app.put("/api/settings/dope-day")
+def update_dope_day_settings(
+    data: DopeDaySettingsIn,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user = current_user(user_cookie, authorization)
+    require_settings_user(user)
+    reset_minutes = parse_reset_time(data.reset_time)
+    changed_at = utc_now().astimezone(timezone.utc)
+    retroactive_from = changed_at - timedelta(hours=RESET_RETROACTIVE_HOURS)
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM dope_day_reset_changes ORDER BY changed_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+        current_minutes = int(row["reset_minutes"]) if row else DEFAULT_DOPE_DAY_RESET_MINUTES
+        if reset_minutes != current_minutes:
+            conn.execute(
+                """
+                INSERT INTO dope_day_reset_changes
+                  (reset_minutes, changed_by, changed_at, retroactive_from)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    reset_minutes,
+                    user["id"],
+                    changed_at.isoformat(timespec="seconds"),
+                    retroactive_from.isoformat(timespec="seconds"),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM dope_day_reset_changes ORDER BY changed_at DESC, id DESC LIMIT 1"
+            ).fetchone()
+    return dope_day_settings_payload(row, changed_at)
+
+
 @app.get("/api/stats/progress")
 def progress_stats(
     days: int = 7,
@@ -1177,12 +1318,24 @@ def progress_stats(
     if days not in {7, 14, 30}:
         raise HTTPException(status_code=400, detail="Progress range must be 7, 14, or 30 days")
 
-    today = current_dope_day()
-    first_day = today - timedelta(days=days - 1)
-    start_utc = datetime.combine(first_day, DOPE_DAY_RESET, tzinfo=timezone.utc) - IST_OFFSET
-    buckets: dict[date, dict[int, dict[str, Any]]] = {first_day + timedelta(days=i): {} for i in range(days)}
-
     with db() as conn:
+        reset_changes = load_reset_changes(conn)
+        current_reset_minutes = (
+            int(reset_changes[-1]["reset_minutes"])
+            if reset_changes
+            else DEFAULT_DOPE_DAY_RESET_MINUTES
+        )
+        today = current_dope_day(reset_time_from_minutes(current_reset_minutes))
+        first_day = today - timedelta(days=days - 1)
+        buckets: dict[date, dict[int, dict[str, Any]]] = {
+            first_day + timedelta(days=i): {} for i in range(days)
+        }
+        # Read one extra local calendar day so an older reset rule near the
+        # chart boundary cannot drop a completion before it is re-bucketed.
+        start_utc = (
+            datetime.combine(first_day - timedelta(days=1), datetime_time.min, tzinfo=timezone.utc)
+            - IST_OFFSET
+        )
         rows = conn.execute(
             """
             SELECT d.time_minutes, d.completed_at, u.id AS user_id, u.display_name, u.color
@@ -1197,7 +1350,8 @@ def progress_stats(
         ).fetchall()
 
     for row in rows:
-        day = dope_day_for(row["completed_at"])
+        reset_minutes = reset_minutes_for_completion(row["completed_at"], reset_changes)
+        day = dope_day_for(row["completed_at"], reset_time_from_minutes(reset_minutes))
         if day not in buckets:
             continue
         stack = buckets[day].setdefault(
