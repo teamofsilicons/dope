@@ -257,7 +257,7 @@ async function loadRoute() {
   if (state.booted) setRouteLoading(true);
   try {
     state.route = location.hash.replace("#", "") || "active";
-    if (!["active", "review", "completed", "archived", "diagnostics"].includes(state.route)) state.route = "active";
+    if (!["active", "saved", "review", "completed", "archived", "diagnostics"].includes(state.route)) state.route = "active";
     if (state.route === "review" && !isReviewer()) state.route = "active";
     const isDiagnostics = state.route === "diagnostics";
     $("board-shell").hidden = isDiagnostics;
@@ -270,11 +270,12 @@ async function loadRoute() {
     }
     clearInterval(state.diagTimer);
     const isActive = state.route === "active";
+    const isSaved = state.route === "saved";
     const isReview = state.route === "review";
     document.querySelectorAll(".nav-links a").forEach((a) => a.classList.toggle("active", a.dataset.route === state.route));
-    $("page-title").textContent = isActive ? "Active Dopes" : isReview ? "Review Dopes" : state.route === "completed" ? "Completed Dopes" : "Archived Dopes";
-    $("page-title").classList.toggle("compact-title", isActive);
-    $("page-subtitle").textContent = state.route === "active" ? "Product work waiting to be amended." : isReview ? "Work waiting for Saket or Brainspoof to review." : state.route === "completed" ? "Work closed with commit links." : "Dopes moved out of the main queue.";
+    $("page-title").textContent = isActive ? "Active Dopes" : isSaved ? "Saved for Later" : isReview ? "Review Dopes" : state.route === "completed" ? "Completed Dopes" : "Archived Dopes";
+    $("page-title").classList.toggle("compact-title", isActive || isSaved);
+    $("page-subtitle").textContent = state.route === "active" ? "Product work waiting to be amended." : isSaved ? "Work set aside and excluded from analytics." : isReview ? "Work waiting for Saket or Brainspoof to review." : state.route === "completed" ? "Work closed with commit links." : "Dopes moved out of the main queue.";
     $("page-subtitle").hidden = isActive;
     $("progress-panel").hidden = !isActive;
     $("new-dope").style.display = isActive ? "inline-flex" : "none";
@@ -510,7 +511,7 @@ function render() {
   const assigned = items.filter((d) => d.status === "active" && d.assigned_to);
   const listed = state.route === "active" ? items.filter((d) => !d.assigned_to) : items;
   $("active-assigned").innerHTML = assigned.length ? assigned.map(card).join("") : `<p class="empty">No one is working on a dope right now.</p>`;
-  $("list-heading").textContent = state.route === "active" ? "Open Dopes" : state.route === "review" ? "Review Queue" : state.route === "completed" ? "Completed List" : "Archive";
+  $("list-heading").textContent = state.route === "active" ? "Open Dopes" : state.route === "saved" ? "Saved Dopes" : state.route === "review" ? "Review Queue" : state.route === "completed" ? "Completed List" : "Archive";
   $("dope-list").innerHTML = listed.map(card).join("");
   $("empty").hidden = listed.length !== 0;
   document.querySelectorAll("[data-dope]").forEach((el) => {
@@ -595,6 +596,7 @@ function card(d) {
   const status = d.status === "review" ? `In review from ${escapeHtml(d.completed_by?.display_name || "someone")} on ${localDate(d.completed_at)}` :
     d.status === "completed" && review.rejected_at ? `Review rejected by ${escapeHtml(review.rejected_by?.display_name || "someone")}` :
     d.status === "completed" ? `Completed by ${escapeHtml(d.completed_by?.display_name || "someone")} on ${localDate(d.completed_at)}` :
+    d.status === "saved" ? `Saved for later by ${escapeHtml(d.saved_by?.display_name || "someone")} on ${localDate(d.saved_at)}` :
     d.status === "archived" ? `Archived ${localDate(d.archived_at)}` :
     hasReviewChanges ? `Review changes${d.assigned_to ? ` assigned to ${escapeHtml(d.assigned_to.display_name)}` : ""}` :
     review.parent_id ? `Review changes${d.assigned_to ? ` assigned to ${escapeHtml(d.assigned_to.display_name)}` : ""}` :
@@ -607,6 +609,7 @@ function card(d) {
       <h3>${escapeHtml(d.title)}</h3>
       <span class="card-tags">
         ${cat ? categoryPill(cat) : ""}
+        ${d.status === "saved" ? `<span class="pill saved-pill"><i class="ph ph-bookmark-simple"></i>Saved</span>` : ""}
         ${d.status === "review" ? `<span class="pill review-pill"><i class="ph ph-git-branch"></i>Review</span>` : ""}
         ${review.parent_id || hasReviewChanges ? `<span class="pill review-pill"><i class="ph ph-arrow-bend-up-right"></i>Review changes</span>` : ""}
         ${status ? `<span class="meta"><span>${status}</span></span>` : ""}
@@ -1201,6 +1204,7 @@ async function openDope(id) {
           <span class="pill"><i class="ph ph-clock"></i>${formatMinutes(d.time_minutes)}</span>
           ${d.assigned_to ? `<span class="pill"><i class="ph ph-user"></i>${escapeHtml(d.assigned_to.display_name)}</span>` : ""}
           ${d.completed_by ? `<span class="pill"><i class="ph ph-check-circle"></i>${escapeHtml(d.completed_by.display_name)} on ${localDate(d.completed_at)}</span>` : ""}
+          ${d.status === "saved" ? `<span class="pill saved-pill"><i class="ph ph-bookmark-simple"></i>Saved ${localDate(d.saved_at)}</span>` : ""}
         </div>
         <div class="version-control">
           ${editCount ? `<button id="version-toggle" class="version-button" value="default">${editCount} ${editCount === 1 ? "edit" : "edits"}</button>` : `<span class="version-empty">no edits</span>`}
@@ -1221,11 +1225,13 @@ async function openDope(id) {
       ${d.status === "active" && blocked ? `<button class="primary-wide" value="default" disabled><i class="ph ph-warning-circle"></i>Dependencies Undoped</button>` : ""}
       ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="assign" class="primary-wide" value="default"><i class="ph ph-target"></i>I'll take it</button>` : ""}
       ${d.status === "active" && !blocked && d.assigned_to ? `<button id="complete" class="primary-wide" value="default"><i class="ph ph-confetti"></i>Doped</button>` : ""}
+      ${d.status === "saved" ? `<button id="move-to-active" class="primary-wide" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Move to Active</button>` : ""}
       ${d.status === "review" && isReviewer() ? `<button id="approve-review" class="primary-wide" value="default"><i class="ph ph-check-circle"></i>Doped</button>` : ""}
       <div class="modal-action-row">
         ${d.status !== "archived" ? `<button id="edit-dope" class="icon-action secondary" value="default" title="Edit"><i class="ph ph-pencil-simple"></i></button>` : ""}
         ${d.status !== "archived" ? `<button id="archive" class="icon-action danger" value="default" title="Archive"><i class="ph ph-archive"></i></button>` : `<button id="restore" class="secondary" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Restore</button>`}
         ${d.status === "active" && d.assigned_to ? `<button id="unassign" class="non-cta" value="default"><i class="ph ph-user-minus"></i>Unassign Dope</button>` : ""}
+        ${d.status === "active" ? `<button id="save-later" class="secondary action-text" value="default"><i class="ph ph-bookmark-simple"></i>Save for later</button>` : ""}
         ${d.status === "active" && !blocked ? `<button id="send-review" class="secondary action-text" value="default"><i class="ph ph-git-branch"></i>Send for Review</button>` : ""}
         ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="complete" class="secondary action-text" value="default"><i class="ph ph-confetti"></i>Doped</button>` : ""}
         ${d.status === "review" && isReviewer() ? `<button id="reject-review" class="danger action-text" value="default"><i class="ph ph-x-circle"></i>Reject</button>` : ""}
@@ -1291,6 +1297,24 @@ function bindDopeActions(d) {
   if (unassign) unassign.onclick = (event) => { event.preventDefault(); openUnassignDope(d); };
   const complete = $("complete");
   if (complete) complete.onclick = (event) => { event.preventDefault(); openCompleteDope(d); };
+  const saveLater = $("save-later");
+  if (saveLater) saveLater.onclick = async (event) => {
+    event.preventDefault();
+    await api(`/api/dopes/${d.id}/save-for-later`, { method: "POST" });
+    $("dope-dialog").close();
+    await loadRoute();
+    toast("Dope saved for later", async () => {
+      await api(`/api/dopes/${d.id}/move-to-active`, { method: "POST" });
+      await loadRoute();
+      toast("Dope moved back to Active");
+    });
+  };
+  const moveToActive = $("move-to-active");
+  if (moveToActive) moveToActive.onclick = async (event) => {
+    event.preventDefault();
+    await api(`/api/dopes/${d.id}/move-to-active`, { method: "POST" });
+    await closeReload("Dope moved back to Active");
+  };
   const sendReview = $("send-review");
   if (sendReview) sendReview.onclick = (event) => { event.preventDefault(); openReviewDope(d); };
   const approveReview = $("approve-review");

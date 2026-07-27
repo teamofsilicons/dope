@@ -1,8 +1,8 @@
-const CACHE_NAME = "dope-shell-20260723-reset-settings";
+const CACHE_NAME = "dope-shell-20260728-save-for-later";
 const SHELL_ASSETS = [
   "/",
-  "/static/app.css?v=20260723-reset-settings",
-  "/static/app.js?v=20260723-reset-settings",
+  "/static/app.css?v=20260728-save-for-later",
+  "/static/app.js?v=20260728-save-for-later",
   "/static/si-logo-light.png",
 ];
 

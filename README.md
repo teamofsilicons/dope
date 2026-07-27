@@ -40,6 +40,14 @@ Dope payloads from `GET /api/dopes` include `comment_count`,
 `unread_comments`, `unread_mentions`, and `latest_comment_at` for the caller,
 which power the new-message badges.
 
+### Save for later
+
+- `POST /api/dopes/{id}/save-for-later` — move an active dope to the Saved
+  tab and exclude it from progress and diagnostics analytics.
+- `POST /api/dopes/{id}/move-to-active` — return a saved dope to Active while
+  preserving its assignment and history.
+- `GET /api/dopes?status=saved` — list saved dopes, newest saved first.
+
 ### Settings
 
 - `GET /api/settings/dope-day` — Saket-only reset-time settings, including the

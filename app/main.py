@@ -124,6 +124,8 @@ def init_db() -> None:
               review_followup_id INTEGER REFERENCES dopes(id),
               review_parent_id INTEGER REFERENCES dopes(id),
               review_priority INTEGER NOT NULL DEFAULT 0,
+              saved_by INTEGER REFERENCES users(id),
+              saved_at TEXT,
               archived_by INTEGER REFERENCES users(id),
               archived_at TEXT
             );
@@ -258,6 +260,13 @@ def init_db() -> None:
             "review_priority": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, definition in review_columns.items():
+            if name not in dope_columns:
+                conn.execute(f"ALTER TABLE dopes ADD COLUMN {name} {definition}")
+        saved_columns = {
+            "saved_by": "INTEGER REFERENCES users(id)",
+            "saved_at": "TEXT",
+        }
+        for name, definition in saved_columns.items():
             if name not in dope_columns:
                 conn.execute(f"ALTER TABLE dopes ADD COLUMN {name} {definition}")
         if not conn.execute("SELECT 1 FROM categories LIMIT 1").fetchone():
@@ -480,6 +489,8 @@ def validate_http_url(value: str, label: str) -> str:
 def status_for(row: sqlite3.Row) -> str:
     if row["archived_at"]:
         return "archived"
+    if row["saved_at"]:
+        return "saved"
     if row["completed_at"] and row["review_requested_at"] and not row["review_approved_at"] and not row["review_rejected_at"]:
         return "review"
     if row["completed_at"]:
@@ -690,6 +701,7 @@ def active_dependent_rows(conn: sqlite3.Connection, dope_id: int) -> list[dict[s
         JOIN dopes child ON child.id = dd.dope_id
         WHERE child.archived_at IS NULL
           AND child.completed_at IS NULL
+          AND child.saved_at IS NULL
         """
     ).fetchall()
     reverse_graph: dict[int, list[int]] = {}
@@ -844,6 +856,7 @@ def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection, viewer_id: int | No
                 "created_by",
                 "assigned_to",
                 "completed_by",
+                "saved_by",
                 "archived_by",
                 "review_requested_by",
                 "review_approved_by",
@@ -902,6 +915,7 @@ def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection, viewer_id: int | No
         "assigned_at": row["assigned_at"],
         "completed_at": row["completed_at"],
         "completion_description": row["completion_description"] or "",
+        "saved_at": row["saved_at"],
         "archived_at": row["archived_at"],
         "status": status_for(row),
         "review": {
@@ -921,6 +935,7 @@ def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection, viewer_id: int | No
         "created_by": user_public(users.get(row["created_by"])),
         "assigned_to": user_public(users.get(row["assigned_to"])),
         "completed_by": user_public(users.get(row["completed_by"])),
+        "saved_by": user_public(users.get(row["saved_by"])),
         "archived_by": user_public(users.get(row["archived_by"])),
         "assignment_history": [dict(h) for h in history],
         "commit_links": [l["url"] for l in links],
@@ -1161,9 +1176,10 @@ def list_dopes(
 ) -> list[dict[str, Any]]:
     user = current_user(user_cookie, authorization)
     where = {
-        "active": "archived_at IS NULL AND completed_at IS NULL",
-        "completed": "archived_at IS NULL AND completed_at IS NOT NULL",
-        "review": "archived_at IS NULL AND completed_at IS NOT NULL AND review_requested_at IS NOT NULL AND review_approved_at IS NULL AND review_rejected_at IS NULL",
+        "active": "archived_at IS NULL AND completed_at IS NULL AND saved_at IS NULL",
+        "saved": "archived_at IS NULL AND completed_at IS NULL AND saved_at IS NOT NULL",
+        "completed": "archived_at IS NULL AND completed_at IS NOT NULL AND saved_at IS NULL",
+        "review": "archived_at IS NULL AND completed_at IS NOT NULL AND saved_at IS NULL AND review_requested_at IS NOT NULL AND review_approved_at IS NULL AND review_rejected_at IS NULL",
         "archived": "archived_at IS NOT NULL",
         "all": "1 = 1",
     }.get(status)
@@ -1182,6 +1198,7 @@ def list_dopes(
             WHERE dd.depends_on_id = dopes.id
               AND child.archived_at IS NULL
               AND child.completed_at IS NULL
+              AND child.saved_at IS NULL
           ) > 0 THEN 0
           WHEN (
             SELECT COUNT(*)
@@ -1201,6 +1218,7 @@ def list_dopes(
             WHERE dd.depends_on_id = dopes.id
               AND child.archived_at IS NULL
               AND child.completed_at IS NULL
+              AND child.saved_at IS NULL
           ) > 0 THEN -(
             SELECT COUNT(*)
             FROM dope_dependencies dd
@@ -1208,6 +1226,7 @@ def list_dopes(
             WHERE dd.depends_on_id = dopes.id
               AND child.archived_at IS NULL
               AND child.completed_at IS NULL
+              AND child.saved_at IS NULL
           )
           WHEN (
             SELECT COUNT(*)
@@ -1227,6 +1246,8 @@ def list_dopes(
         title COLLATE NOCASE ASC,
         id DESC
         """
+    elif status == "saved":
+        order = "saved_at DESC, id DESC"
     else:
         order = """
         CASE
@@ -1342,6 +1363,7 @@ def progress_stats(
             FROM dopes d
             JOIN users u ON u.id = d.completed_by
             WHERE d.archived_at IS NULL
+              AND d.saved_at IS NULL
               AND d.completed_at IS NOT NULL
               AND d.completed_at >= ?
             ORDER BY d.completed_at ASC
@@ -1444,7 +1466,7 @@ def assign_dope(
     assigned_at = now_iso()
     with db() as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
-        if not row or row["archived_at"] or row["completed_at"]:
+        if not row or row["archived_at"] or row["completed_at"] or row["saved_at"]:
             raise HTTPException(status_code=404, detail="Active dope not found")
         if incomplete_dependency_rows(conn, dope_id):
             raise HTTPException(status_code=400, detail="Dependencies Undoped")
@@ -1473,7 +1495,7 @@ def unassign_dope(
         raise HTTPException(status_code=400, detail="Reason is required")
     with db() as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
-        if not row or not row["assigned_to"] or row["archived_at"] or row["completed_at"]:
+        if not row or not row["assigned_to"] or row["archived_at"] or row["completed_at"] or row["saved_at"]:
             raise HTTPException(status_code=400, detail="Dope is not assigned")
         conn.execute("UPDATE dopes SET assigned_to = NULL, assigned_at = NULL WHERE id = ?", (dope_id,))
         conn.execute(
@@ -1508,7 +1530,7 @@ def complete_dope(
     completed_at = now_iso()
     with db() as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
-        if not row or row["archived_at"] or row["completed_at"]:
+        if not row or row["archived_at"] or row["completed_at"] or row["saved_at"]:
             raise HTTPException(status_code=404, detail="Active dope not found")
         if incomplete_dependency_rows(conn, dope_id):
             raise HTTPException(status_code=400, detail="Dependencies Undoped")
@@ -1560,7 +1582,7 @@ def send_dope_for_review(
     completed_at = now_iso()
     with db() as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
-        if not row or row["archived_at"] or row["completed_at"]:
+        if not row or row["archived_at"] or row["completed_at"] or row["saved_at"]:
             raise HTTPException(status_code=404, detail="Active dope not found")
         if incomplete_dependency_rows(conn, dope_id):
             raise HTTPException(status_code=400, detail="Dependencies Undoped")
@@ -1744,6 +1766,50 @@ def set_dope_category(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
+@app.post("/api/dopes/{dope_id}/save-for-later")
+def save_dope_for_later(
+    dope_id: int,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user = current_user(user_cookie, authorization)
+    with db() as conn:
+        row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
+        if not row or row["archived_at"] or row["completed_at"] or row["saved_at"]:
+            raise HTTPException(status_code=404, detail="Active dope not found")
+        conn.execute(
+            "UPDATE dopes SET saved_by = ?, saved_at = ? WHERE id = ?",
+            (user["id"], now_iso(), dope_id),
+        )
+        return dope_payload(
+            conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(),
+            conn,
+            user["id"],
+        )
+
+
+@app.post("/api/dopes/{dope_id}/move-to-active")
+def move_saved_dope_to_active(
+    dope_id: int,
+    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user = current_user(user_cookie, authorization)
+    with db() as conn:
+        row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
+        if not row or row["archived_at"] or row["completed_at"] or not row["saved_at"]:
+            raise HTTPException(status_code=404, detail="Saved dope not found")
+        conn.execute(
+            "UPDATE dopes SET saved_by = NULL, saved_at = NULL WHERE id = ?",
+            (dope_id,),
+        )
+        return dope_payload(
+            conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(),
+            conn,
+            user["id"],
+        )
+
+
 @app.post("/api/dopes/{dope_id}/archive")
 def archive_dope(
     dope_id: int,
@@ -1890,18 +1956,39 @@ def diagnostics(
                 WHERE dd.dope_id = d.id AND p.completed_at IS NULL
               ) AS blocked
             FROM dopes d
-            WHERE d.archived_at IS NULL AND d.completed_at IS NULL
+            WHERE d.archived_at IS NULL
+              AND d.completed_at IS NULL
+              AND d.saved_at IS NULL
             """
         ).fetchall()
         completed_rows = conn.execute(
             """
             SELECT completed_by, time_minutes, completed_at
-            FROM dopes WHERE archived_at IS NULL AND completed_at IS NOT NULL
+            FROM dopes
+            WHERE archived_at IS NULL
+              AND completed_at IS NOT NULL
+              AND saved_at IS NULL
             """
         ).fetchall()
-        archived_count = conn.execute("SELECT COUNT(*) FROM dopes WHERE archived_at IS NOT NULL").fetchone()[0]
-        created_counts = dict(conn.execute("SELECT created_by, COUNT(*) FROM dopes GROUP BY created_by").fetchall())
-        comment_counts = dict(conn.execute("SELECT user_id, COUNT(*) FROM comments GROUP BY user_id").fetchall())
+        archived_count = conn.execute(
+            "SELECT COUNT(*) FROM dopes WHERE archived_at IS NOT NULL AND saved_at IS NULL"
+        ).fetchone()[0]
+        created_counts = dict(
+            conn.execute(
+                "SELECT created_by, COUNT(*) FROM dopes WHERE saved_at IS NULL GROUP BY created_by"
+            ).fetchall()
+        )
+        comment_counts = dict(
+            conn.execute(
+                """
+                SELECT c.user_id, COUNT(*)
+                FROM comments c
+                JOIN dopes d ON d.id = c.dope_id
+                WHERE d.saved_at IS NULL
+                GROUP BY c.user_id
+                """
+            ).fetchall()
+        )
         categories = {row["id"]: row for row in conn.execute("SELECT id, name, color FROM categories").fetchall()}
 
         totals = {
@@ -1979,14 +2066,16 @@ def diagnostics(
         events: list[dict[str, Any]] = []
         for row in conn.execute(
             "SELECT d.id, d.title, d.created_at AS at, u.id AS uid, u.username, u.display_name, u.color "
-            "FROM dopes d JOIN users u ON u.id = d.created_by ORDER BY d.created_at DESC LIMIT ?",
+            "FROM dopes d JOIN users u ON u.id = d.created_by "
+            "WHERE d.saved_at IS NULL ORDER BY d.created_at DESC LIMIT ?",
             (limit,),
         ):
             events.append(event("created", row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["id"], row["title"]))
         for row in conn.execute(
             "SELECT d.id, d.title, d.completed_at AS at, d.review_requested_at, d.review_branch_url, "
             "u.id AS uid, u.username, u.display_name, u.color "
-            "FROM dopes d JOIN users u ON u.id = d.completed_by WHERE d.completed_at IS NOT NULL "
+            "FROM dopes d JOIN users u ON u.id = d.completed_by "
+            "WHERE d.completed_at IS NOT NULL AND d.saved_at IS NULL "
             "ORDER BY d.completed_at DESC LIMIT ?",
             (limit,),
         ):
@@ -1994,7 +2083,8 @@ def diagnostics(
             events.append(event(kind, row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["id"], row["title"], row["review_branch_url"] if kind == "reviewed" else None))
         for row in conn.execute(
             "SELECT d.id, d.title, d.archived_at AS at, u.id AS uid, u.username, u.display_name, u.color "
-            "FROM dopes d JOIN users u ON u.id = d.archived_by WHERE d.archived_at IS NOT NULL "
+            "FROM dopes d JOIN users u ON u.id = d.archived_by "
+            "WHERE d.archived_at IS NOT NULL AND d.saved_at IS NULL "
             "ORDER BY d.archived_at DESC LIMIT ?",
             (limit,),
         ):
@@ -2003,6 +2093,7 @@ def diagnostics(
             "SELECT h.dope_id, h.assigned_at, h.unassigned_at, h.unassign_reason, d.title, "
             "u.id AS uid, u.username, u.display_name, u.color "
             "FROM assignment_history h JOIN dopes d ON d.id = h.dope_id JOIN users u ON u.id = h.user_id "
+            "WHERE d.saved_at IS NULL "
             "ORDER BY h.assigned_at DESC LIMIT ?",
             (limit,),
         ):
@@ -2015,6 +2106,7 @@ def diagnostics(
         for row in conn.execute(
             "SELECT c.dope_id, c.body, c.created_at AS at, d.title, u.id AS uid, u.username, u.display_name, u.color "
             "FROM comments c JOIN dopes d ON d.id = c.dope_id JOIN users u ON u.id = c.user_id "
+            "WHERE d.saved_at IS NULL "
             "ORDER BY c.created_at DESC LIMIT ?",
             (limit,),
         ):
@@ -2023,7 +2115,7 @@ def diagnostics(
         for row in conn.execute(
             "SELECT v.dope_id, v.edited_at AS at, d.title, u.id AS uid, u.username, u.display_name, u.color "
             "FROM dope_versions v JOIN dopes d ON d.id = v.dope_id JOIN users u ON u.id = v.edited_by "
-            "WHERE v.version_number > 1 ORDER BY v.edited_at DESC LIMIT ?",
+            "WHERE v.version_number > 1 AND d.saved_at IS NULL ORDER BY v.edited_at DESC LIMIT ?",
             (limit,),
         ):
             events.append(event("edited", row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["dope_id"], row["title"]))
