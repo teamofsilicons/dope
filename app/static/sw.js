@@ -1,4 +1,4 @@
-const CACHE_NAME = "dope-shell-20260728-save-for-later";
+const CACHE_NAME = "dope-shell-20260728-reset-window-10m";
 const SHELL_ASSETS = [
   "/",
   "/static/app.css?v=20260728-save-for-later",

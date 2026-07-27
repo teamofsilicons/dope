@@ -30,7 +30,7 @@ SESSION_MAX_AGE = 60 * 60 * 24 * 30
 IST_OFFSET = timedelta(hours=5, minutes=30)
 DOPE_DAY_RESET = datetime_time(hour=9)
 DEFAULT_DOPE_DAY_RESET_MINUTES = 9 * 60
-RESET_RETROACTIVE_HOURS = 16
+RESET_RETROACTIVE_MINUTES = 10
 REVIEWER_USERNAMES = {"saket", "brainspoof"}
 DELEGATED_COMPLETION_USERNAME = "saket"
 SETTINGS_USERNAME = "saket"
@@ -579,7 +579,7 @@ def dope_day_settings_payload(row: sqlite3.Row | None, now: datetime | None = No
         "timezone": "IST",
         "next_reset_at": next_reset.isoformat(timespec="seconds"),
         "remaining_seconds": max(0, int((next_reset - current).total_seconds())),
-        "history_window_hours": RESET_RETROACTIVE_HOURS,
+        "history_window_minutes": RESET_RETROACTIVE_MINUTES,
         "changed_at": row["changed_at"] if row else None,
         "retroactive_from": row["retroactive_from"] if row else None,
     }
@@ -1303,7 +1303,7 @@ def update_dope_day_settings(
     require_settings_user(user)
     reset_minutes = parse_reset_time(data.reset_time)
     changed_at = utc_now().astimezone(timezone.utc)
-    retroactive_from = changed_at - timedelta(hours=RESET_RETROACTIVE_HOURS)
+    retroactive_from = changed_at - timedelta(minutes=RESET_RETROACTIVE_MINUTES)
     with db() as conn:
         row = conn.execute(
             "SELECT * FROM dope_day_reset_changes ORDER BY changed_at DESC, id DESC LIMIT 1"

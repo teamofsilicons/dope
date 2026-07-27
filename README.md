@@ -54,7 +54,7 @@ which power the new-message badges.
   next reset and remaining seconds in IST.
 - `PUT /api/settings/dope-day` — Saket-only update with body
   `{"reset_time": "09:00"}`. Each update re-buckets only completions from the
-  preceding 16 hours; older progress keeps its prior reset rule.
+  preceding 10 minutes; older progress keeps its prior reset rule.
 
 ### Diagnostics
 
