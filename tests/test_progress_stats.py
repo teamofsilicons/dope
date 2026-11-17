@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-import importlib
 from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-
-def load_main(tmp_path, monkeypatch):
-    monkeypatch.setenv("DOPE_DB_PATH", str(tmp_path / "dope.db"))
-    import app.main as main
-
-    return importlib.reload(main)
+from silicon import load_main, login, org_db
 
 
 def ist_time_to_utc_iso(main, day: date, hour: int, minute: int = 0) -> str:
@@ -40,13 +34,9 @@ def test_progress_stats_combines_july_20_and_21_minutes(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "current_dope_day", lambda reset_time=None: date(2026, 7, 22))
 
     with TestClient(main.app) as client:
-        client.post(
-            "/api/auth/signup",
-            json={"username": "shubham", "password": "password", "display_name": "Shubham"},
-        )
-        client.post("/api/auth/login", json={"username": "shubham", "password": "password"})
-        with main.db() as conn:
-            user_id = conn.execute("SELECT id FROM users WHERE username = 'shubham'").fetchone()[0]
+        login(client, "shubham", "Shubham")
+        with org_db() as conn:
+            user_id = conn.execute("SELECT id FROM users WHERE account_handle = 'c:shubham'").fetchone()[0]
             rows = [
                 (30, ist_time_to_utc_iso(main, date(2026, 7, 20), 10)),
                 (45, ist_time_to_utc_iso(main, date(2026, 7, 21), 10)),
@@ -86,29 +76,22 @@ def test_progress_stats_groups_completed_hours_by_person(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "current_dope_day", lambda reset_time=None: date(2026, 6, 10))
 
     with TestClient(main.app) as client:
-        client.post(
-            "/api/auth/signup",
-            json={"username": "shubham", "password": "password", "display_name": "Shubham"},
-        )
-        client.post(
-            "/api/auth/signup",
-            json={"username": "saket", "password": "password", "display_name": "Saket"},
-        )
-        login = client.post("/api/auth/login", json={"username": "shubham", "password": "password"})
-        assert login.status_code == 200
+        login(client, "shubham", "Shubham")
+        login(client, "saket", "Saket")
+        login(client, "shubham")
 
         today = main.current_dope_day()
         yesterday = today - timedelta(days=1)
-        with main.db() as conn:
+        with org_db() as conn:
             users = {
                 row["username"]: row["id"]
-                for row in conn.execute("SELECT id, username FROM users").fetchall()
+                for row in conn.execute("SELECT id, account_handle AS username FROM users").fetchall()
             }
             rows = [
-                ("A", 120, users["shubham"], ist_time_to_utc_iso(main, today, 10)),
-                ("B", 30, users["shubham"], ist_time_to_utc_iso(main, today, 18)),
-                ("C", 60, users["saket"], ist_time_to_utc_iso(main, today, 11)),
-                ("D", 45, users["saket"], ist_time_to_utc_iso(main, yesterday, 9)),
+                ("A", 120, users["c:shubham"], ist_time_to_utc_iso(main, today, 10)),
+                ("B", 30, users["c:shubham"], ist_time_to_utc_iso(main, today, 18)),
+                ("C", 60, users["c:saket"], ist_time_to_utc_iso(main, today, 11)),
+                ("D", 45, users["c:saket"], ist_time_to_utc_iso(main, yesterday, 9)),
             ]
             conn.executemany(
                 """
@@ -128,8 +111,8 @@ def test_progress_stats_groups_completed_hours_by_person(tmp_path, monkeypatch):
 
     assert today_bucket["total_minutes"] == 210
     assert today_bucket["stacks"] == [
-        {"user_id": users["shubham"], "display_name": "Shubham", "color": "#1a1a1a", "minutes": 150, "count": 2},
-        {"user_id": users["saket"], "display_name": "Saket", "color": "#1a1a1a", "minutes": 60, "count": 1},
+        {"user_id": users["c:shubham"], "display_name": "Shubham", "color": "#1a1a1a", "minutes": 150, "count": 2},
+        {"user_id": users["c:saket"], "display_name": "Saket", "color": "#1a1a1a", "minutes": 60, "count": 1},
     ]
     assert yesterday_bucket["total_minutes"] == 45
     assert yesterday_bucket["stacks"][0]["display_name"] == "Saket"
@@ -139,19 +122,15 @@ def test_profile_color_is_used_in_progress_stats(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        client.post(
-            "/api/auth/signup",
-            json={"username": "shubham", "password": "password", "display_name": "Shubham"},
-        )
-        client.post("/api/auth/login", json={"username": "shubham", "password": "password"})
+        login(client, "shubham", "Shubham")
         response = client.patch("/api/me", json={"display_name": "Shubham S", "color": "#ffbb00"})
         assert response.status_code == 200
         assert response.json()["color"] == "#ffbb00"
 
         today = main.current_dope_day()
         completed_at = ist_time_to_utc_iso(main, today, 10)
-        with main.db() as conn:
-            user_id = conn.execute("SELECT id FROM users WHERE username = 'shubham'").fetchone()[0]
+        with org_db() as conn:
+            user_id = conn.execute("SELECT id FROM users WHERE account_handle = 'c:shubham'").fetchone()[0]
             conn.execute(
                 """
                 INSERT INTO dopes
@@ -171,13 +150,9 @@ def test_dependent_count_includes_transitive_children(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        client.post(
-            "/api/auth/signup",
-            json={"username": "shubham", "password": "password", "display_name": "Shubham"},
-        )
-        client.post("/api/auth/login", json={"username": "shubham", "password": "password"})
-        with main.db() as conn:
-            user_id = conn.execute("SELECT id FROM users WHERE username = 'shubham'").fetchone()[0]
+        login(client, "shubham", "Shubham")
+        with org_db() as conn:
+            user_id = conn.execute("SELECT id FROM users WHERE account_handle = 'c:shubham'").fetchone()[0]
             now = main.now_iso()
             conn.executemany(
                 """
@@ -203,11 +178,7 @@ def test_categories_seeded_and_manageable(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        client.post(
-            "/api/auth/signup",
-            json={"username": "shubham", "password": "password", "display_name": "Shubham"},
-        )
-        client.post("/api/auth/login", json={"username": "shubham", "password": "password"})
+        login(client, "shubham", "Shubham")
 
         seeded = client.get("/api/categories").json()
         assert [c["name"] for c in seeded] == [
@@ -265,11 +236,7 @@ def test_api_key_can_manage_dopes(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        client.post(
-            "/api/auth/signup",
-            json={"username": "shubham", "password": "password", "display_name": "Shubham"},
-        )
-        client.post("/api/auth/login", json={"username": "shubham", "password": "password"})
+        login(client, "shubham", "Shubham")
         created = client.post("/api/me/keys", json={"name": "Codex"}).json()
         key = created["key"]
         headers = {"Authorization": f"Bearer {key}"}

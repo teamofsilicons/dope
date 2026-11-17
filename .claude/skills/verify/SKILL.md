@@ -1,41 +1,17 @@
 ---
 name: verify
-description: Build/launch/drive recipe for verifying Dope (FastAPI + vanilla JS) changes end-to-end in a real browser.
+description: Verify Silicon Dopes with an isolated database and a real desktop and mobile browser.
 ---
 
-# Verifying Dope changes
+# Verify Silicon Dopes
 
-## Launch (isolated DB — never run against ./dope.db)
+Install the service dependencies, pytest and Playwright in the project virtual environment. Install Chromium with `python -m playwright install chromium` or set `CHROMIUM_PATH` to an existing Chrome executable.
 
-```bash
-cd <repo>
-DOPE_DB_PATH=/path/to/scratch/verify.db .venv/bin/uvicorn app.main:app --port 8787 &
+```sh
+.venv/bin/python -m pytest -q
+.venv/bin/python tests/browser_boards.py
 ```
 
-Migrations run on startup; a fresh DB path gives a clean instance. The venv at
-`.venv/` already has uvicorn and all deps.
+The browser check starts Dopes and local Accounts and Organizations test endpoints on ephemeral loopback ports, uses a temporary database and closes the servers when it finishes. It drives the hosted chooser, two teammates sharing a board, creating, taking, completing with and without a note, reopening, switching to a personal account, and signing out. Desktop uses the board sidebar. Mobile uses the board selector.
 
-## Seed via API (curl + cookie jar)
-
-- Signup requires `display_name`: `POST /api/auth/signup {"username","password","display_name"}`
-- Login sets the `dope_session` cookie: `POST /api/auth/login` with `-c jar.txt`
-- Create dope: `POST /api/dopes {"title","description_html","time_text":"2h"}` (`time_text`, not `time_minutes`)
-- Assign to self: `POST /api/dopes/{id}/assign`
-- Send for review: `POST /api/dopes/{id}/review {"note","branch_url"}` (both required)
-- Complete: `POST /api/dopes/{id}/complete {"completion_text":"... https://a-commit-link"}` (needs ≥1 http link)
-- Reviewers are hardcoded usernames in `app/main.py` (`REVIEWER_USERNAMES = {"saket", "brainspoof"}`) — sign up as `saket` to see review-queue UI.
-
-## Drive the UI
-
-Playwright (installed for system `python3`, chromium cached). Inject the
-`dope_session` cookie from the curl jar into the browser context, then
-`page.goto("http://127.0.0.1:8787")`. Routes are hash-based: `#active`,
-`#completed`, `#review`, `#archived`, `#diagnostics`. Open a dope's modal by
-clicking its title text. Listen for `pageerror`/console errors — the whole UI
-is one file, `app/static/app.js`, so a render bug usually throws.
-
-## Gotchas
-
-- The dope detail modal re-renders on every open; button handlers are wired
-  by id (`#complete`, `#assign`, `#send-review`, …) right after render.
-- Mobile breakpoint media query is at the bottom of `app/static/app.css`.
+For manual testing with a registered Silicon app, set `DOPE_DB_PATH` to a scratch path and configure its callback as described in the README. Open Dopes and use **Sign in with Silicon Accounts**. A work identity sees only its current Organizations groups. Use the provided account switcher to check a personal identity.

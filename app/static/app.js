@@ -1,2279 +1,438 @@
-const state = {
-  user: null,
-  route: "active",
-  dopes: [],
-  allDopes: [],
-  categories: [],
-  progress: [],
-  progressDays: 7,
-  filters: { categoryIds: [], min: "", max: "", createdFrom: "", createdTo: "", depsDoped: false, completedBy: "", from: "", to: "" },
-  authMode: "login",
-  booted: false,
-  users: [],
-  usersFetchedAt: 0,
-  diag: null,
-  diagWindow: "7d",
-  diagTimer: null,
-  settingsTimer: null,
-  nextResetAt: null,
-  boardTimer: null,
-  dayTimer: null,
-  boardRefreshInFlight: false,
-  lastBoardRefreshAt: 0,
-  categoriesFetchedAt: 0,
-  routeVersion: 0,
-};
-
-const DEFAULT_FILTERS = { categoryIds: [], min: "", max: "", createdFrom: "", createdTo: "", depsDoped: false, completedBy: "", from: "", to: "" };
+"use strict";
 
 const $ = (id) => document.getElementById(id);
-const CACHE_PREFIX = "dope-cache:";
-const DRAFT_PREFIX = "dope-draft:";
-const DEFAULT_COLOR = "#1a1a1a";
-const BOARD_REFRESH_INTERVAL_MS = 30000;
-const CATEGORY_REFRESH_INTERVAL_MS = 120000;
-const BACKGROUND_REFRESH_MIN_MS = 5000;
-const DOPE_DAY_RESET_UTC_HOUR = 3;
-const DOPE_DAY_RESET_UTC_MINUTE = 30;
-const REVIEWER_USERNAMES = new Set(["saket", "brainspoof"]);
-const DELEGATED_COMPLETION_USERNAME = "saket";
+const labels = { active: "Open", completed: "Done", review: "In review", saved: "Saved", archived: "Archived" };
+let account, boards = [], board, items = [], viewerId;
+let filter = "active", busy = false, loaded = false, boardVersion = 0, contextVersion = 0;
+const drafts = new Map();
 
-function storageRead(prefix, key, fallback = null) {
-  try {
-    const raw = localStorage.getItem(`${prefix}${key}`);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function button(text, className, action) {
+  const node = element("button", className, text);
+  node.type = "button";
+  node.addEventListener("click", action);
+  return node;
+}
+
+async function api(path, { method = "GET", body, scope } = {}) {
+  const headers = { Accept: "application/json" };
+  if (scope) {
+    headers["X-Dope-Board"] = scope;
+    headers["X-Dope-Account"] = account.uuid;
   }
-}
-
-function storageWrite(prefix, key, value) {
-  try { localStorage.setItem(`${prefix}${key}`, JSON.stringify(value)); } catch {}
-}
-
-function storageRemove(prefix, key) {
-  try { localStorage.removeItem(`${prefix}${key}`); } catch {}
-}
-
-function cacheRead(key, fallback = null) {
-  return storageRead(CACHE_PREFIX, key, fallback);
-}
-
-function cacheWrite(key, value) {
-  storageWrite(CACHE_PREFIX, key, value);
-}
-
-function draftRead(key, fallback = {}) {
-  return storageRead(DRAFT_PREFIX, key, fallback) || fallback;
-}
-
-function draftWrite(key, value) {
-  storageWrite(DRAFT_PREFIX, key, value);
-}
-
-function draftRemove(key) {
-  storageRemove(DRAFT_PREFIX, key);
-}
-
-function minutesFromText(value) {
-  const text = String(value || "").trim().toLowerCase();
-  if (!text) return null;
-  const tokenRe = /(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m)?/g;
-  const matches = [...text.matchAll(tokenRe)];
-  const consumed = matches.map((match) => match[0]).join("").replace(/\s+/g, "");
-  if (!matches.length || consumed !== text.replace(/\s+/g, "")) return null;
-  const minutes = matches.reduce((total, match) => {
-    const amount = Number(match[1]);
-    const unit = match[2] || "hr";
-    return total + (unit.startsWith("h") ? amount * 60 : amount);
-  }, 0);
-  return Math.max(1, Math.round(minutes));
-}
-
-function formatMinutes(minutes) {
-  if (minutes < 60) return `${minutes}min`;
-  const hours = minutes / 60;
-  return Number.isInteger(hours) ? `${hours}hr` : `${hours.toFixed(1).replace(/\.0$/, "")}hr`;
-}
-
-function localDate(iso) {
-  if (!iso) return "";
-  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-}
-
-function fullDate(iso) {
-  if (!iso) return "";
-  return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
-}
-
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-  });
-  if (!res.ok) {
-    let message = "Something went wrong";
-    try { message = (await res.json()).detail || message; } catch {}
-    throw new Error(message);
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const response = await fetch(path, { method, headers, body: JSON.stringify(body),
+    credentials: "same-origin", cache: "no-store" });
+  if (!response.ok) {
+    const json = await response.json().catch(() => ({}));
+    const error = new Error(typeof json.detail === "string" ? json.detail : "The request could not be completed.");
+    error.status = response.status;
+    throw error;
   }
-  return res.json();
+  return response.json();
 }
 
-function toast(message, undo) {
-  const el = $("toast");
-  const openModal = document.querySelector("dialog[open] .modal");
-  const toastHost = openModal || document.body;
-  if (el.parentElement !== toastHost) toastHost.appendChild(el);
-  el.innerHTML = "";
-  el.append(document.createTextNode(message));
-  if (undo) {
-    const btn = document.createElement("button");
-    btn.className = "undo";
-    btn.textContent = "Undo";
-    btn.onclick = undo;
-    el.append(btn);
-  }
-  el.hidden = false;
-  clearTimeout(el._timer);
-  el._timer = setTimeout(() => { el.hidden = true; }, 10000);
+function notice(message, retry = false) {
+  $("notice").hidden = !message;
+  $("notice").firstElementChild.textContent = message || "";
+  $("retry").hidden = !retry;
 }
 
-function celebrateDope() {
-  const existing = $("dope-celebration");
-  if (existing) existing.remove();
-  const shell = document.createElement("div");
-  shell.id = "dope-celebration";
-  shell.className = "dope-celebration";
-  const marks = ["Doped", "Ship it", "Done", "Amended"];
-  shell.innerHTML = `
-    <div class="celebration-card">
-      <i class="ph ph-confetti"></i>
-      <strong>Doped</strong>
-      <span>Commit links locked in.</span>
-    </div>
-    ${Array.from({ length: 24 }, (_, i) => {
-      const x = 8 + Math.random() * 84;
-      const delay = Math.random() * 0.2;
-      const duration = 0.75 + Math.random() * 0.45;
-      const label = marks[i % marks.length];
-      return `<span class="celebration-piece" style="left:${x}%; animation-delay:${delay}s; animation-duration:${duration}s;">${escapeHtml(label)}</span>`;
-    }).join("")}
-  `;
-  document.body.appendChild(shell);
-  setTimeout(() => shell.remove(), 1800);
+function signIn(message) {
+  ++boardVersion;
+  ++contextVersion;
+  account = board = null;
+  items = []; boards = []; drafts.clear(); loaded = false;
+  $("description").value = "";
+  $("dopes").replaceChildren();
+  $("boards").replaceChildren();
+  $("board-select").replaceChildren();
+  $("board-title").textContent = "";
+  $("detail").close();
+  $("detail-body").replaceChildren();
+  $("workspace").hidden = $("account-menu").hidden = $("loading").hidden = true;
+  $("signin").hidden = false;
+  $("signin-message").textContent = message || "";
+  $("signin-message").hidden = !message;
 }
 
-function showAuth() {
-  $("loading-view").hidden = true;
-  $("loading-view").style.display = "none";
-  $("auth-view").hidden = false;
-  $("app-view").hidden = true;
-  $("auth-view").style.display = "grid";
-  $("app-view").style.display = "none";
+function clearBoard() {
+  items = []; viewerId = null; loaded = false;
+  $("detail").close();
+  $("detail-body").replaceChildren();
+  $("dopes").replaceChildren();
+  $("filters").replaceChildren();
+  $("list-status").hidden = false;
+  $("list-status").textContent = "Loading dopes…";
+  $("add").disabled = true;
 }
 
-function hideInitialLoading() {
-  $("loading-view").hidden = true;
-  $("loading-view").style.display = "none";
+function storedBoard() {
+  try { return sessionStorage.getItem("silicon-dopes.board." + account.uuid); } catch { return null; }
 }
 
-function showApp(keepLoading = false) {
-  if (!keepLoading) hideInitialLoading();
-  $("auth-view").hidden = true;
-  $("app-view").hidden = false;
-  $("auth-view").style.display = "none";
-  $("app-view").style.display = "block";
-  $("user-name").textContent = state.user.display_name;
-  $("user-color-dot").style.background = state.user.color || DEFAULT_COLOR;
-  $("review-nav").hidden = !isReviewer();
-  $("settings-open").hidden = !canManageSettings();
-}
-
-function setRouteLoading(loading) {
-  const el = $("route-loading");
-  if (el) el.hidden = !loading;
-}
-
-function updateAuthMode() {
-  const signup = state.authMode === "signup";
-  $("auth-display").hidden = !signup;
-  $("auth-display").required = signup;
-  $("auth-submit").textContent = signup ? "Create account" : "Sign in";
-  $("auth-toggle").textContent = signup ? "Already have an account" : "Create an account";
-}
-
-function isReviewer() {
-  return state.user && REVIEWER_USERNAMES.has(String(state.user.username || "").trim().toLowerCase());
-}
-
-function canCompleteForOthers() {
-  return state.user && String(state.user.username || "").trim().toLowerCase() === DELEGATED_COMPLETION_USERNAME;
-}
-
-function canManageSettings() {
-  return state.user && String(state.user.username || "").trim().toLowerCase() === "saket";
-}
-
-async function init() {
-  updateAuthMode();
-  state.filters = { ...state.filters, ...draftRead("filters", {}) };
-  state.categories = cacheRead("categories", []) || [];
-  try {
-    state.user = await api("/api/me");
-    cacheWrite("me", state.user);
-  } catch {
-    const cachedUser = cacheRead("me");
-    if (cachedUser) {
-      state.user = cachedUser;
-      showApp(true);
-      await loadRoute();
-      state.booted = true;
-      hideInitialLoading();
-      setRouteLoading(false);
-      startAutoRefresh();
-      toast("Offline cache");
-      return;
+function renderBoards() {
+  const rail = $("boards"), select = $("board-select");
+  rail.replaceChildren(); select.replaceChildren();
+  const groups = new Map();
+  for (const choice of boards) {
+    const groupId = choice.kind === "team" ? "organization:" + choice.id.slice(5).split("/")[0] : choice.id;
+    if (!groups.has(groupId)) {
+      const label = choice.organization || "Private";
+      const section = element("div", "board-group");
+      section.append(element("p", "group-name", label));
+      rail.append(section);
+      const options = element("optgroup"); options.label = label; select.append(options);
+      groups.set(groupId, { section, options });
     }
-    state.booted = true;
-    showAuth();
-    return;
+    const name = choice.kind === "organization" ? "Organization board" : choice.name;
+    const link = button("", "board-link", () => selectBoard(choice));
+    const icon = element("span", "board-icon " + choice.kind);
+    icon.setAttribute("aria-hidden", "true");
+    link.append(icon, element("span", "", name));
+    link.setAttribute("aria-current", String(choice.id === board?.id));
+    const group = groups.get(groupId);
+    group.section.append(link);
+    const option = element("option", "", name);
+    option.value = choice.id; group.options.append(option);
   }
-  showApp(true);
-  loadCategories(true).then(render).catch(() => {});
+  if (board) select.value = board.id;
+}
+
+async function loadContext() {
+  const version = ++contextVersion;
   try {
-    await loadRoute();
-  } catch (err) {
-    toast(err.message || "Could not load dopes");
-  } finally {
-    state.booted = true;
-    hideInitialLoading();
-    setRouteLoading(false);
-    startAutoRefresh();
-  }
-}
-
-async function loadRoute() {
-  const routeVersion = ++state.routeVersion;
-  if (state.booted) setRouteLoading(true);
-  try {
-    state.route = location.hash.replace("#", "") || "active";
-    if (!["active", "saved", "review", "completed", "archived", "diagnostics"].includes(state.route)) state.route = "active";
-    if (state.route === "review" && !isReviewer()) state.route = "active";
-    const isDiagnostics = state.route === "diagnostics";
-    $("board-shell").hidden = isDiagnostics;
-    $("diagnostics-page").hidden = !isDiagnostics;
-    $("diagnostics-open").classList.toggle("is-current", isDiagnostics);
-    document.querySelectorAll(".nav-links a").forEach((a) => a.classList.toggle("active", !isDiagnostics && a.dataset.route === state.route));
-    if (isDiagnostics) {
-      await loadDiagnostics();
-      return;
-    }
-    clearInterval(state.diagTimer);
-    const isActive = state.route === "active";
-    const isSaved = state.route === "saved";
-    const isReview = state.route === "review";
-    document.querySelectorAll(".nav-links a").forEach((a) => a.classList.toggle("active", a.dataset.route === state.route));
-    $("page-title").textContent = isActive ? "Active Dopes" : isSaved ? "Saved for Later" : isReview ? "Review Dopes" : state.route === "completed" ? "Completed Dopes" : "Archived Dopes";
-    $("page-title").classList.toggle("compact-title", isActive || isSaved);
-    $("page-subtitle").textContent = state.route === "active" ? "Product work waiting to be amended." : isSaved ? "Work set aside and excluded from analytics." : isReview ? "Work waiting for Saket or Brainspoof to review." : state.route === "completed" ? "Work closed with commit links." : "Dopes moved out of the main queue.";
-    $("page-subtitle").hidden = isActive;
-    $("progress-panel").hidden = !isActive;
-    $("new-dope").style.display = isActive ? "inline-flex" : "none";
-    $("active-assigned-wrap").style.display = isActive ? "block" : "none";
-    $("completed-filters").style.display = state.route === "completed" ? "block" : "none";
-    const progressDays = state.progressDays;
-    const cachedDopes = cacheRead(`dopes:${state.route}`);
-    const cachedProgress = cacheRead(`progress:${progressDays}`);
-    if (cachedDopes) state.dopes = cachedDopes;
-    if (isActive && cachedProgress) state.progress = cachedProgress;
-    if (cachedDopes && routeVersion === state.routeVersion) render();
-    try {
-      let nextDopes;
-      let nextProgress = state.progress;
-      if (isActive) {
-        [nextDopes, nextProgress] = await Promise.all([
-          api(`/api/dopes?status=${state.route}`),
-          api(`/api/stats/progress?days=${progressDays}`),
-        ]);
-      } else {
-        nextDopes = await api(`/api/dopes?status=${state.route}`);
-      }
-      if (routeVersion !== state.routeVersion || (isActive && state.progressDays !== progressDays)) return;
-      state.dopes = nextDopes;
-      state.progress = nextProgress;
-      if (isActive) cacheWrite(`progress:${progressDays}`, state.progress);
-      cacheWrite(`dopes:${state.route}`, state.dopes);
-      state.allDopes = [];
-      state.lastBoardRefreshAt = Date.now();
-    } catch (err) {
-      if (!cachedDopes) throw err;
-      toast("Showing offline cache");
-    }
-    if (routeVersion === state.routeVersion) render();
-  } finally {
-    setRouteLoading(false);
-  }
-}
-
-function msUntilNextDopeDayReset(now = new Date()) {
-  if (state.nextResetAt) {
-    let resetAt = Date.parse(state.nextResetAt);
-    if (Number.isFinite(resetAt)) {
-      while (resetAt <= now.getTime()) resetAt += 24 * 60 * 60 * 1000;
-      state.nextResetAt = new Date(resetAt).toISOString();
-      return resetAt - now.getTime();
-    }
-  }
-  const reset = new Date(now.getTime());
-  reset.setUTCHours(DOPE_DAY_RESET_UTC_HOUR, DOPE_DAY_RESET_UTC_MINUTE, 0, 0);
-  if (reset <= now) reset.setUTCDate(reset.getUTCDate() + 1);
-  return reset.getTime() - now.getTime();
-}
-
-function refreshVisibleData({ force = false } = {}) {
-  if (!state.user || !state.booted) return;
-  if (state.route === "diagnostics") {
-    if (force || !document.hidden) loadDiagnostics().catch(() => {});
-    return;
-  }
-  refreshCurrentRoute({ force }).catch(() => {});
-}
-
-function scheduleDopeDayRefresh() {
-  clearTimeout(state.dayTimer);
-  state.dayTimer = setTimeout(() => {
-    refreshVisibleData({ force: true });
-    scheduleDopeDayRefresh();
-  }, msUntilNextDopeDayReset() + 2000);
-}
-
-function startAutoRefresh() {
-  stopAutoRefresh();
-  state.boardTimer = setInterval(() => {
-    refreshCurrentRoute().catch(() => {});
-  }, BOARD_REFRESH_INTERVAL_MS);
-  scheduleDopeDayRefresh();
-}
-
-function stopAutoRefresh() {
-  clearInterval(state.boardTimer);
-  clearTimeout(state.dayTimer);
-  state.boardTimer = null;
-  state.dayTimer = null;
-}
-
-async function maybeRefreshCategories() {
-  if (Date.now() - state.categoriesFetchedAt < CATEGORY_REFRESH_INTERVAL_MS) return;
-  await loadCategories(true).catch(() => {});
-}
-
-async function refreshCurrentRoute({ force = false } = {}) {
-  if (!state.user || !state.booted || state.route === "diagnostics") return;
-  if (!force && document.hidden) return;
-  if (state.boardRefreshInFlight) return;
-  if (!force && Date.now() - state.lastBoardRefreshAt < BACKGROUND_REFRESH_MIN_MS) return;
-
-  const route = state.route;
-  const routeVersion = state.routeVersion;
-  const progressDays = state.progressDays;
-  state.boardRefreshInFlight = true;
-  try {
-    const categoryRefresh = maybeRefreshCategories();
-    let dopes;
-    let progress = state.progress;
-    if (route === "active") {
-      [dopes, progress] = await Promise.all([
-        api(`/api/dopes?status=${route}`),
-        api(`/api/stats/progress?days=${progressDays}`),
-      ]);
+    const result = await api("/api/boards");
+    if (version !== contextVersion) return;
+    const switched = account?.uuid !== result.account.uuid;
+    if (switched) { drafts.clear(); board = null; }
+    account = result.account; boards = result.boards;
+    $("account-name").textContent = account.display_name;
+    $("account-handle").textContent = account.handle;
+    $("initial").textContent = Array.from(account.display_name)[0]?.toUpperCase() || "•";
+    $("signin").hidden = $("loading").hidden = true;
+    $("workspace").hidden = $("account-menu").hidden = false;
+    const choice = boards.find((b) => b.id === (board?.id || storedBoard())) || boards[0];
+    await selectBoard(choice);
+  } catch (error) {
+    if (version !== contextVersion) return;
+    if (error.status === 401) {
+      signIn(signinMessage);
     } else {
-      dopes = await api(`/api/dopes?status=${route}`);
+      ++boardVersion;
+      clearBoard();
+      $("list-status").textContent = "Your boards could not be loaded.";
+      if (!account) $("loading").textContent = "Your boards could not be loaded.";
+      notice(error.message || "Your boards could not be loaded.", true);
     }
-    await categoryRefresh;
-    if (state.route !== route || state.routeVersion !== routeVersion || (route === "active" && state.progressDays !== progressDays)) return;
-    state.dopes = dopes;
-    state.progress = progress;
-    if (route === "active") cacheWrite(`progress:${progressDays}`, state.progress);
-    cacheWrite(`dopes:${route}`, state.dopes);
-    state.allDopes = [];
-    state.lastBoardRefreshAt = Date.now();
-    render();
-  } finally {
-    state.boardRefreshInFlight = false;
   }
 }
 
-async function ensureAllDopes(force = false) {
-  if (!force && state.allDopes.length) return state.allDopes;
-  const cached = cacheRead("dopes:all");
-  if (!force && cached) {
-    state.allDopes = cached;
-    return state.allDopes;
+async function selectBoard(choice) {
+  if (!choice) return;
+  if (board?.id !== choice.id) {
+    if (board) drafts.set(board.id, $("description").value);
+    clearBoard();
+    $("description").value = drafts.get(choice.id) || "";
+    $("search").value = ""; filter = "active"; notice();
   }
+  board = choice;
+  try { sessionStorage.setItem("silicon-dopes.board." + account.uuid, choice.id); } catch {}
+  renderBoards();
+  $("board-title").textContent = choice.name;
+  $("board-context").textContent = choice.kind === "team" ? choice.organization + " / Team board" :
+    choice.kind === "organization" ? "Organization board" : "Private board";
+  document.title = choice.name + " · Silicon Dopes";
+  await refreshBoard();
+}
+
+async function refreshBoard() {
+  const version = ++boardVersion;
+  const id = board.id;
   try {
-    state.allDopes = await api("/api/dopes?status=all");
-    cacheWrite("dopes:all", state.allDopes);
-  } catch (err) {
-    if (!cached) throw err;
-    state.allDopes = cached;
-    toast("Showing offline cache");
-  }
-  return state.allDopes;
-}
-
-async function loadCategories(force = false) {
-  if (!force && state.categories.length) return state.categories;
-  const cached = cacheRead("categories");
-  if (!force && cached) {
-    state.categories = cached;
-    return state.categories;
-  }
-  try {
-    state.categories = await api("/api/categories");
-    cacheWrite("categories", state.categories);
-    state.categoriesFetchedAt = Date.now();
-  } catch {
-    if (cached) state.categories = cached;
-  }
-  return state.categories;
-}
-
-function categoryById(id) {
-  if (id == null) return null;
-  return state.categories.find((c) => c.id === Number(id)) || null;
-}
-
-function searchableText(d) {
-  const div = document.createElement("div");
-  div.innerHTML = d.description_html || "";
-  return `${d.title} ${div.textContent || ""} ${d.assigned_to?.display_name || ""} ${d.completed_by?.display_name || ""}`;
-}
-
-function filteredDopes() {
-  let items = [...state.dopes];
-  const query = $("search").value.trim();
-  if (query) {
-    const fuse = new Fuse(items.map((d) => ({ ...d, searchText: searchableText(d) })), {
-      keys: ["title", "searchText"],
-      threshold: 0.6,
-      distance: 120,
-      ignoreLocation: true,
-      includeScore: true,
-    });
-    items = fuse.search(query).map((r) => r.item);
-  }
-  const categoryIds = (state.filters.categoryIds || []).map(Number);
-  if (categoryIds.length) {
-    const wantUncategorized = categoryIds.includes(0);
-    items = items.filter((d) => (d.category ? categoryIds.includes(d.category.id) : wantUncategorized));
-  }
-  const min = minutesFromText(state.filters.min);
-  const max = minutesFromText(state.filters.max);
-  if (min) items = items.filter((d) => d.time_minutes >= min);
-  if (max) items = items.filter((d) => d.time_minutes <= max);
-  if (state.filters.createdFrom) items = items.filter((d) => d.created_at?.slice(0, 10) >= state.filters.createdFrom);
-  if (state.filters.createdTo) items = items.filter((d) => d.created_at?.slice(0, 10) <= state.filters.createdTo);
-  if (state.filters.depsDoped) items = items.filter((d) => (d.blocked_dependencies || []).length === 0);
-  if (state.route === "completed") {
-    const by = state.filters.completedBy.trim().toLowerCase();
-    if (by) items = items.filter((d) => (d.completed_by?.display_name || "").toLowerCase().includes(by));
-    if (state.filters.from) items = items.filter((d) => d.completed_at?.slice(0, 10) >= state.filters.from);
-    if (state.filters.to) items = items.filter((d) => d.completed_at?.slice(0, 10) <= state.filters.to);
-  }
-  return items;
-}
-
-function filtersActive() {
-  const baseActive = Boolean(
-    (state.filters.categoryIds || []).length ||
-    state.filters.min ||
-    state.filters.max ||
-    state.filters.createdFrom ||
-    state.filters.createdTo ||
-    state.filters.depsDoped
-  );
-  if (state.route !== "completed") return baseActive;
-  return baseActive || Boolean(state.filters.completedBy || state.filters.from || state.filters.to);
-}
-
-function renderFilterButton() {
-  const active = filtersActive();
-  const button = $("filter-open");
-  button.classList.toggle("secondary", !active);
-  button.classList.toggle("filters-active", active);
-  button.innerHTML = `<i class="ph ph-sliders-horizontal"></i>${active ? "Filters Applied" : "Filter"}`;
-}
-
-function render() {
-  renderFilterButton();
-  renderProgressChart();
-  const items = filteredDopes();
-  const assigned = items.filter((d) => d.status === "active" && d.assigned_to);
-  const listed = state.route === "active" ? items.filter((d) => !d.assigned_to) : items;
-  $("active-assigned").innerHTML = assigned.length ? assigned.map(card).join("") : `<p class="empty">No one is working on a dope right now.</p>`;
-  $("list-heading").textContent = state.route === "active" ? "Open Dopes" : state.route === "saved" ? "Saved Dopes" : state.route === "review" ? "Review Queue" : state.route === "completed" ? "Completed List" : "Archive";
-  $("dope-list").innerHTML = listed.map(card).join("");
-  $("empty").hidden = listed.length !== 0;
-  document.querySelectorAll("[data-dope]").forEach((el) => {
-    el.onclick = () => openDope(Number(el.dataset.dope));
-  });
-}
-
-function progressColor(stack) {
-  if (/^#[0-9a-fA-F]{6}$/.test(stack.color || "")) return stack.color;
-  const colors = ["#1a1a1a", "#5a5a5a", "#8b8b8b", "#2e6f8e", "#5a9a6b", "#7a4d8e", "#9a4d42"];
-  return colors[Math.abs(Number(stack.user_id) || 0) % colors.length];
-}
-
-function dopeCountLabel(count) {
-  return `${count} ${count === 1 ? "dope" : "dopes"}`;
-}
-
-function renderProgressChart() {
-  const panel = $("progress-panel");
-  if (!panel || state.route !== "active") return;
-  document.querySelectorAll("[data-progress-days]").forEach((button) => {
-    button.classList.toggle("active", Number(button.dataset.progressDays) === state.progressDays);
-  });
-  const chart = $("progress-chart");
-  const maxMinutes = Math.max(60, ...state.progress.map((day) => day.total_minutes || 0));
-  chart.innerHTML = state.progress.map((day) => {
-    const total = day.total_minutes || 0;
-    const stacks = day.stacks.length ? day.stacks.map((stack) => {
-      const width = Math.max(2, (stack.minutes / maxMinutes) * 100);
-      const tip = `${stack.display_name}\n${formatMinutes(stack.minutes)}\n${dopeCountLabel(stack.count)}`;
-      return `<span class="progress-stack" style="width:${width}%;background:${progressColor(stack)}" data-progress-tip="${escapeHtml(tip)}" aria-label="${escapeHtml(tip)}"></span>`;
-    }).join("") : `<span class="progress-empty"></span>`;
-    return `
-      <div class="progress-row">
-        <span class="progress-date">${escapeHtml(day.label)}</span>
-        <div class="progress-track">${stacks}</div>
-        <span class="progress-total">${total ? formatMinutes(total) : "0"}</span>
-      </div>
-    `;
-  }).join("");
-}
-
-function showProgressTooltip(event) {
-  const target = event.target.closest("[data-progress-tip]");
-  const tip = $("progress-tooltip");
-  if (!target || !tip) return;
-  tip.textContent = target.dataset.progressTip;
-  tip.hidden = false;
-  moveProgressTooltip(event);
-}
-
-function moveProgressTooltip(event) {
-  const tip = $("progress-tooltip");
-  if (!tip || tip.hidden) return;
-  const offset = 14;
-  const rect = tip.getBoundingClientRect();
-  const left = Math.min(window.innerWidth - rect.width - 10, event.clientX + offset);
-  const top = Math.min(window.innerHeight - rect.height - 10, event.clientY + offset);
-  tip.style.left = `${Math.max(10, left)}px`;
-  tip.style.top = `${Math.max(10, top)}px`;
-}
-
-function hideProgressTooltip() {
-  const tip = $("progress-tooltip");
-  if (tip) tip.hidden = true;
-}
-
-function commentBadge(d) {
-  const count = d.comment_count || 0;
-  const unread = d.unread_comments || 0;
-  const mentioned = (d.unread_mentions || 0) > 0;
-  if (!count) return "";
-  return `<span class="pill comment-pill ${unread ? "has-unread" : ""}">
-    <i class="ph ph-chat-circle"></i>${count}
-    ${mentioned ? `<span class="comment-new is-mention">@ you</span>` : unread ? `<span class="comment-new">${unread} new</span>` : ""}
-  </span>`;
-}
-
-function card(d) {
-  const review = d.review || {};
-  const hasReviewChanges = d.status === "active" && review.rejected_at;
-  const status = d.status === "review" ? `In review from ${escapeHtml(d.completed_by?.display_name || "someone")} on ${localDate(d.completed_at)}` :
-    d.status === "completed" && review.rejected_at ? `Review rejected by ${escapeHtml(review.rejected_by?.display_name || "someone")}` :
-    d.status === "completed" ? `Completed by ${escapeHtml(d.completed_by?.display_name || "someone")} on ${localDate(d.completed_at)}` :
-    d.status === "saved" ? `Saved for later by ${escapeHtml(d.saved_by?.display_name || "someone")} on ${localDate(d.saved_at)}` :
-    d.status === "archived" ? `Archived ${localDate(d.archived_at)}` :
-    hasReviewChanges ? `Review changes${d.assigned_to ? ` assigned to ${escapeHtml(d.assigned_to.display_name)}` : ""}` :
-    review.parent_id ? `Review changes${d.assigned_to ? ` assigned to ${escapeHtml(d.assigned_to.display_name)}` : ""}` :
-    d.assigned_to ? `Claimed by ${escapeHtml(d.assigned_to.display_name)}` : "";
-  const blocked = d.status === "active" && (d.blocked_dependencies || []).length > 0;
-  const cat = d.category;
-  const accent = cat ? ` style="--accent:${escapeHtml(cat.color)}"` : "";
-  return `<button class="dope-card ${blocked ? "is-blocked" : ""} ${d.status === "review" ? "is-review" : ""} ${review.parent_id || hasReviewChanges ? "is-review-change" : ""} ${cat ? "has-accent" : ""}" data-dope="${d.id}"${accent}>
-    <span class="card-main">
-      <h3>${escapeHtml(d.title)}</h3>
-      <span class="card-tags">
-        ${cat ? categoryPill(cat) : ""}
-        ${d.status === "saved" ? `<span class="pill saved-pill"><i class="ph ph-bookmark-simple"></i>Saved</span>` : ""}
-        ${d.status === "review" ? `<span class="pill review-pill"><i class="ph ph-git-branch"></i>Review</span>` : ""}
-        ${review.parent_id || hasReviewChanges ? `<span class="pill review-pill"><i class="ph ph-arrow-bend-up-right"></i>Review changes</span>` : ""}
-        ${status ? `<span class="meta"><span>${status}</span></span>` : ""}
-      </span>
-    </span>
-    <span class="card-pills">
-      ${commentBadge(d)}
-      ${d.dependent_count ? `<span class="pill"><i class="ph ph-tree-structure"></i>${d.dependent_count} ${d.dependent_count === 1 ? "dependent" : "dependents"}</span>` : ""}
-      <span class="pill"><i class="ph ph-clock"></i>${formatMinutes(d.time_minutes)}</span>
-    </span>
-  </button>`;
-}
-
-function categoryPill(cat) {
-  return `<span class="category-pill" style="--accent:${escapeHtml(cat.color)}"><span class="category-dot"></span>${escapeHtml(cat.name)}</span>`;
-}
-
-function inlineCategoryHtml(d) {
-  const selected = d.category ? d.category.id : null;
-  const chips = state.categories.map((cat) => `
-    <button type="button" class="category-choice ${selected === cat.id ? "is-selected" : ""}" data-inline-category="${cat.id}" style="--accent:${escapeHtml(cat.color)}">
-      <span class="category-dot"></span>${escapeHtml(cat.name)}
-    </button>
-  `).join("");
-  const none = `<button type="button" class="category-choice category-choice-none ${selected == null ? "is-selected" : ""}" data-inline-category="">None</button>`;
-  const body = state.categories.length
-    ? `${none}${chips}`
-    : `<span class="category-empty-hint">No categories yet — add some from the tag icon in the navbar.</span>`;
-  return `
-    <div class="inline-category">
-      <span class="field-label">Category</span>
-      <div id="inline-category-picker" class="category-choices">${body}</div>
-    </div>
-  `;
-}
-
-function bindInlineCategory(d) {
-  const picker = $("inline-category-picker");
-  if (!picker) return;
-  picker.querySelectorAll("[data-inline-category]").forEach((button) => {
-    button.onclick = async (event) => {
-      event.preventDefault();
-      const raw = button.dataset.inlineCategory;
-      const categoryId = raw ? Number(raw) : null;
-      const current = d.category ? d.category.id : null;
-      if (current === categoryId) return;
-      try {
-        const updated = await api(`/api/dopes/${d.id}/category`, {
-          method: "PATCH",
-          body: JSON.stringify({ category_id: categoryId }),
-        });
-        d.category = updated.category;
-        state.dopes = state.dopes.map((it) => (it.id === updated.id ? updated : it));
-        state.allDopes = state.allDopes.map((it) => (it.id === updated.id ? updated : it));
-        cacheWrite(`dopes:${state.route}`, state.dopes);
-        picker.querySelectorAll("[data-inline-category]").forEach((b) => b.classList.toggle("is-selected", b === button));
-        render();
-        toast(updated.category ? `Category set to ${updated.category.name}` : "Category cleared");
-      } catch (err) { toast(err.message); }
-    };
-  });
-}
-
-function escapeHtml(value) {
-  return String(value || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[c]));
-}
-
-function sanitizeHtml(html) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  doc.querySelectorAll("script,style,iframe,object,embed,link,meta").forEach((n) => n.remove());
-  doc.body.querySelectorAll("*").forEach((node) => {
-    [...node.attributes].forEach((attr) => {
-      const name = attr.name.toLowerCase();
-      const value = attr.value;
-      if (name.startsWith("on")) node.removeAttribute(attr.name);
-      if ((name === "href" || name === "src") && !/^(https?:|data:image\/)/i.test(value)) node.removeAttribute(attr.name);
-    });
-  });
-  return doc.body.innerHTML;
-}
-
-function linkifyText(value) {
-  return escapeHtml(value).replace(/https?:\/\/[^\s<]+/g, (url) => {
-    const cleanUrl = url.replace(/[.,;:)\]}]+$/, "");
-    const trailing = url.slice(cleanUrl.length);
-    return `<a href="${cleanUrl}" target="_blank" rel="noreferrer">${cleanUrl}</a>${trailing}`;
-  });
-}
-
-function assignmentHistoryLine(d, h) {
-  const endedByCompletion = d.status === "completed" && h.unassigned_at === d.completed_at;
-  const endLabel = endedByCompletion ? "completed" : "unassigned";
-  const reason = !endedByCompletion && h.unassign_reason ? ` because, and i quote "${escapeHtml(h.unassign_reason)}"` : "";
-  return `${escapeHtml(h.display_name)} started this on ${fullDate(h.assigned_at)}${h.unassigned_at ? ` and ${endLabel} on ${fullDate(h.unassigned_at)}${reason}` : ""}`;
-}
-
-function categoryPickerHtml(selectedId = null) {
-  const selected = selectedId == null ? null : Number(selectedId);
-  const chips = state.categories.map((cat) => `
-    <button type="button" class="category-choice ${selected === cat.id ? "is-selected" : ""}" data-category-choice="${cat.id}" style="--accent:${escapeHtml(cat.color)}">
-      <span class="category-dot"></span>${escapeHtml(cat.name)}
-    </button>
-  `).join("");
-  const none = `<button type="button" class="category-choice category-choice-none ${selected == null ? "is-selected" : ""}" data-category-choice="">None</button>`;
-  return `
-    <div class="field-label">Category</div>
-    <div id="category-picker" class="category-choices" data-selected="${selected == null ? "" : selected}">
-      ${none}${chips}
-      ${state.categories.length ? "" : `<span class="category-empty-hint">No categories yet — add some from the tag icon in the navbar.</span>`}
-    </div>
-  `;
-}
-
-function bindCategoryPicker() {
-  const picker = $("category-picker");
-  if (!picker) return;
-  picker.querySelectorAll("[data-category-choice]").forEach((button) => {
-    button.onclick = (event) => {
-      event.preventDefault();
-      picker.dataset.selected = button.dataset.categoryChoice;
-      picker.querySelectorAll("[data-category-choice]").forEach((b) => b.classList.toggle("is-selected", b === button));
-      picker.dispatchEvent(new Event("change", { bubbles: true }));
-    };
-  });
-}
-
-function selectedCategoryId() {
-  const picker = $("category-picker");
-  if (!picker || !picker.dataset.selected) return null;
-  return Number(picker.dataset.selected);
-}
-
-function dependencyPickerHtml(selectedIds = [], excludeId = null) {
-  const selected = new Set(selectedIds.map(Number));
-  const candidates = state.allDopes
-    .filter((d) => d.id !== excludeId && d.status !== "archived" && (d.status !== "completed" || selected.has(d.id)))
-    .sort((a, b) => a.title.localeCompare(b.title));
-  const options = candidates.length ? candidates.map((d) => `
-    <label class="dependency-option" data-dependency-option-row>
-      <input type="checkbox" data-dependency-option value="${d.id}" ${selected.has(d.id) ? "checked" : ""}>
-      <span>
-        <strong>${escapeHtml(d.title)}</strong>
-        <small>${d.status === "completed" ? "Doped" : "Undoped"} - ${formatMinutes(d.time_minutes)}</small>
-      </span>
-    </label>
-  `).join("") : `<p class="empty mini">No dopes available yet.</p>`;
-  return `
-    <section class="dependency-picker">
-      <button id="dependency-toggle" class="secondary" type="button"><i class="ph ph-link-simple"></i>Add dependencies</button>
-      <div id="dependency-panel" class="dependency-panel" hidden>
-        <label class="dependency-search"><i class="ph ph-magnifying-glass"></i><input id="dependency-search" name="dope_dependency_query" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Search dopes"></label>
-        <div class="dependency-list">${options}</div>
-      </div>
-    </section>
-  `;
-}
-
-function bindDependencyPicker(expanded = false) {
-  const toggle = $("dependency-toggle");
-  const panel = $("dependency-panel");
-  const search = $("dependency-search");
-  if (!toggle || !panel) return;
-  panel.hidden = !expanded;
-  toggle.onclick = (event) => {
-    event.preventDefault();
-    panel.hidden = !panel.hidden;
-  };
-  if (search) {
-    search.oninput = () => {
-      const query = search.value.trim().toLowerCase();
-      document.querySelectorAll("[data-dependency-option-row]").forEach((row) => {
-        row.hidden = query && !row.textContent.toLowerCase().includes(query);
-      });
-    };
+    const data = await api("/api/board", { scope: id });
+    if (version !== boardVersion) return;
+    board = data.board; items = data.dopes; viewerId = data.viewer_id; loaded = true;
+    renderList(); updateComposer();
+  } catch (error) {
+    if (version !== boardVersion) return;
+    clearBoard();
+    $("list-status").textContent = "This board could not be loaded.";
+    if (error.status === 401) signIn("Sign in again to open your boards.");
+    else if (error.status === 403 || error.status === 409) {
+      board = null;
+      await loadContext();
+    } else notice(error.message, true);
   }
 }
 
-function selectedDependencyIds() {
-  return [...document.querySelectorAll("[data-dependency-option]:checked")].map((input) => Number(input.value));
+function updateComposer() {
+  const input = $("description");
+  input.style.height = "auto";
+  input.style.height = Math.min(320, Math.max(50, input.scrollHeight)) + "px";
+  $("add").disabled = !loaded || busy || !input.value.trim();
 }
 
-function bindDraftFields(key, fields) {
-  const save = () => {
-    const draft = {};
-    fields.forEach(([name, id, kind = "value"]) => {
-      const el = $(id);
-      if (!el) return;
-      if (kind === "html") draft[name] = el.innerHTML;
-      else if (kind === "checked-list") draft[name] = selectedDependencyIds();
-      else if (kind === "category") draft[name] = el.dataset.selected ? Number(el.dataset.selected) : null;
-      else if (el.type === "checkbox") draft[name] = el.checked;
-      else draft[name] = el.value;
-    });
-    draftWrite(key, draft);
-  };
-  fields.forEach(([, id, kind = "value"]) => {
-    const el = $(id);
-    if (!el) return;
-    const eventName = kind === "checked-list" || kind === "category" ? "change" : "input";
-    el.addEventListener(eventName, save);
-  });
-  document.querySelectorAll("[data-dependency-option]").forEach((input) => input.addEventListener("change", save));
-  return save;
+function formatDate(iso) {
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(iso));
 }
 
-function preventSearchSubmit(root = document) {
-  root.querySelectorAll('input[type="search"], input[id*="search"], input[name*="query"]').forEach((input) => {
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") event.preventDefault();
-    });
-  });
+function attribution(item) {
+  if (item.completed_at) return "Completed by " + item.finisher + " · " + formatDate(item.completed_at);
+  return "Added by " + item.creator + " · " + formatDate(item.created_at);
 }
 
-async function openNewDope() {
-  await Promise.all([ensureAllDopes(true), loadCategories()]);
-  const draftKey = "new-dope";
-  const draft = draftRead(draftKey);
-  $("modal-title").hidden = true;
-  $("modal-title").textContent = "New Dope";
-  $("modal-body").innerHTML = `
-    <div class="modal-topbar is-visible"><strong>New Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
-    <div class="modal-content">
-      <label>Title<input id="new-title" name="dope_new_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" placeholder="Improve onboarding empty state" value="${escapeHtml(draft.title || "")}"></label>
-      <label>Description<div id="new-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(draft.description_html || "")}</div></label>
-      <label>Time to complete<input id="new-time" name="dope_new_time" autocomplete="off" placeholder="2hr, 30min, 0.5hr" value="${escapeHtml(draft.time_text || "")}"></label>
-      ${categoryPickerHtml(draft.category_id ?? null)}
-      ${dependencyPickerHtml(draft.dependency_ids || [])}
-    </div>
-    <div class="modal-action-bar"><button id="create-dope" class="primary-wide" value="default">Create Dope</button></div>
-  `;
-  wireEditor($("new-description"));
-  bindCategoryPicker();
-  bindDependencyPicker(Boolean((draft.dependency_ids || []).length));
-  preventSearchSubmit($("modal-body"));
-  bindDraftFields(draftKey, [
-    ["title", "new-title"],
-    ["description_html", "new-description", "html"],
-    ["time_text", "new-time"],
-    ["category_id", "category-picker", "category"],
-    ["dependency_ids", "dependency-panel", "checked-list"],
-  ]);
-  $("create-dope").onclick = async (event) => {
-    event.preventDefault();
-    try {
-      await api("/api/dopes", {
-        method: "POST",
-        body: JSON.stringify({
-          title: $("new-title").value,
-          description_html: sanitizeHtml($("new-description").innerHTML),
-          time_text: $("new-time").value,
-          category_id: selectedCategoryId(),
-          dependency_ids: selectedDependencyIds(),
-        }),
-      });
-      draftRemove(draftKey);
-      $("dope-dialog").close();
-      await loadRoute();
-      toast("Dope created");
-    } catch (err) { toast(err.message); }
-  };
-  $("dope-dialog").showModal();
+function renderList() {
+  const counts = {};
+  for (const item of items) counts[item.status] = (counts[item.status] || 0) + 1;
+  if (!["active", "completed"].includes(filter) && !counts[filter]) filter = "active";
+  $("filters").replaceChildren();
+  for (const [key, label] of Object.entries(labels)) {
+    if (key !== "active" && key !== "completed" && !counts[key]) continue;
+    const tab = button(label, "filter", () => { filter = key; renderList(); });
+    tab.setAttribute("aria-pressed", String(filter === key));
+    tab.append(" ", element("span", "count", String(counts[key] || 0)));
+    $("filters").append(tab);
+  }
+  const query = $("search").value.trim().toLowerCase();
+  const visible = items.filter((d) => d.status === filter &&
+    [d.title, d.description, d.assignee, d.creator, d.finisher, d.note].some((v) => v?.toLowerCase().includes(query)));
+  $("list-status").hidden = visible.length > 0;
+  $("list-status").textContent = query ? "No matching dopes." :
+    filter === "active" ? "No open dopes. Add one above." : "No completed dopes yet.";
+  $("dopes").replaceChildren(...visible.map(dopeRow));
 }
 
-function wireEditor(editor) {
-  editor.addEventListener("paste", (event) => {
-    const item = [...event.clipboardData.items].find((i) => i.type.startsWith("image/"));
-    if (!item) return;
-    event.preventDefault();
-    const reader = new FileReader();
-    reader.onload = () => document.execCommand("insertHTML", false, `<img src="${reader.result}" alt="Pasted image">`);
-    reader.readAsDataURL(item.getAsFile());
-  });
-}
-
-async function loadUsers(force = false) {
-  const fresh = state.usersFetchedAt && Date.now() - state.usersFetchedAt < 30000;
-  if (!force && fresh && state.users.length) return state.users;
-  try {
-    state.users = await api("/api/users");
-    state.usersFetchedAt = Date.now();
-  } catch {}
-  return state.users;
-}
-
-function updateDopeInState(updated) {
-  state.dopes = state.dopes.map((it) => (it.id === updated.id ? { ...it, ...updated } : it));
-  state.allDopes = state.allDopes.map((it) => (it.id === updated.id ? { ...it, ...updated } : it));
-  cacheWrite(`dopes:${state.route}`, state.dopes);
-}
-
-function commentsSectionHtml() {
-  return `
-    <section class="comments-block">
-      <h2>Comments</h2>
-      <div id="comment-list" class="comment-list"><p class="empty mini">Loading comments…</p></div>
-      <div class="comment-composer">
-        <div class="composer-box">
-          <div id="mention-menu" class="mention-menu" hidden></div>
-          <textarea id="comment-input" rows="2" placeholder="Write a comment. Type @ to mention a teammate."></textarea>
-        </div>
-        <button id="comment-send" type="button" title="Send"><i class="ph ph-paper-plane-right"></i></button>
-      </div>
-    </section>
-  `;
-}
-
-function commentBodyHtml(c) {
-  let html = linkifyText(c.body);
-  const tokens = [];
-  (c.mentions || []).forEach((m) => {
-    const isMe = state.user && m.id === state.user.id;
-    [m.username, m.display_name].forEach((name) => {
-      if (name) tokens.push({ name, isMe });
-    });
-  });
-  tokens.sort((a, b) => b.name.length - a.name.length).forEach(({ name, isMe }) => {
-    const pattern = escapeHtml(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    html = html.replace(new RegExp(`@${pattern}`, "gi"), (match) => `<span class="mention ${isMe ? "mention-me" : ""}">${match}</span>`);
-  });
-  return html;
-}
-
-function commentHtml(c) {
-  const mine = state.user && c.user?.id === state.user.id;
-  const initial = (c.user?.display_name || "?").trim().charAt(0).toUpperCase();
-  return `<div class="comment ${mine ? "is-mine" : ""}">
-    <span class="comment-avatar" style="background:${escapeHtml(c.user?.color || DEFAULT_COLOR)}">${escapeHtml(initial)}</span>
-    <div class="comment-body">
-      <div class="comment-meta">
-        <strong>${escapeHtml(c.user?.display_name || "someone")}</strong>
-        <span>${fullDate(c.created_at)}</span>
-        ${mine ? `<button type="button" class="comment-delete" data-comment-delete="${c.id}" title="Delete comment"><i class="ph ph-trash"></i></button>` : ""}
-      </div>
-      <div class="comment-text">${commentBodyHtml(c)}</div>
-    </div>
-  </div>`;
-}
-
-function bindComments(d) {
-  const list = $("comment-list");
-  const input = $("comment-input");
-  const send = $("comment-send");
-  if (!list || !input || !send) return;
-  const draftKey = `comment:${d.id}`;
-  input.value = draftRead(draftKey, {}).body || "";
-  let comments = [];
-
-  const renderList = () => {
-    if (!$("comment-list")) return;
-    $("comment-list").innerHTML = comments.length
-      ? comments.map(commentHtml).join("")
-      : `<p class="empty mini">No comments yet. Start the conversation.</p>`;
-    $("comment-list").querySelectorAll("[data-comment-delete]").forEach((button) => {
-      button.onclick = async (event) => {
-        event.preventDefault();
-        if (!confirm("Delete this comment?")) return;
-        try {
-          await api(`/api/dopes/${d.id}/comments/${button.dataset.commentDelete}`, { method: "DELETE" });
-          comments = comments.filter((c) => String(c.id) !== button.dataset.commentDelete);
-          updateDopeInState({ id: d.id, comment_count: comments.length });
-          renderList();
-          render();
-        } catch (err) { toast(err.message); }
-      };
-    });
-  };
-
-  const refresh = async (markRead) => {
-    comments = await api(`/api/dopes/${d.id}/comments`);
-    renderList();
-    if (markRead) {
-      await api(`/api/dopes/${d.id}/comments/read`, { method: "POST" }).catch(() => {});
-      updateDopeInState({ id: d.id, comment_count: comments.length, unread_comments: 0, unread_mentions: 0 });
-      render();
+function dopeRow(item) {
+  const row = element("li", "dope-row");
+  const done = item.status === "completed";
+  const toggle = button(done ? "✓" : "", "toggle" + (done ? " done" : ""), () =>
+    mutate(item, done ? "uncomplete" : "complete"));
+  toggle.setAttribute("aria-label", (done ? "Reopen " : "Mark done: ") + item.title);
+  toggle.title = done ? "Reopen dope" : "Mark done";
+  toggle.disabled = busy || !(done || (item.status === "active" && !item.blocked));
+  const main = element("div", "row-main");
+  main.append(button(item.title, "dope-title", () => showDetail(item)),
+    element("span", "row-meta", attribution(item)));
+  row.append(toggle, main);
+  if (item.status === "active") {
+    if (item.blocked) main.append(element("span", "row-meta", "Waiting on a dependency"));
+    if (item.assigned_to) {
+      const owner = button(item.assigned_to === viewerId ? "Taken by you" : item.assignee,
+        "row-action taken", () => showDetail(item));
+      owner.setAttribute("aria-label", "Taken by " + item.assignee + ", view dope");
+      row.append(owner);
+    } else if (!item.blocked) {
+      const take = button("Take", "row-action", () => mutate(item, "assign"));
+      take.disabled = busy; row.append(take);
     }
-  };
+  }
+  return row;
+}
 
-  refresh(true).catch(() => {
-    if ($("comment-list")) $("comment-list").innerHTML = `<p class="empty mini">Could not load comments.</p>`;
+function addDiscussion(container, item, scope) {
+  const section = element("details", "secondary-panel");
+  section.append(element("summary", "", "Comments"));
+  const list = element("div", "comments"), form = element("form");
+  const input = element("textarea"); input.rows = 2; input.maxLength = 10000; input.required = true;
+  input.setAttribute("aria-label", "Comment"); input.placeholder = "Write a comment…";
+  const send = element("button", "row-action", "Post comment"); send.type = "submit";
+  form.append(input, send); section.append(list, form); container.append(section);
+  const path = "/api/dopes/" + item.id + "/comments";
+  async function read() {
+    const comments = await api(path, { scope });
+    if (!section.isConnected || !section.open) return;
+    list.replaceChildren();
+    for (const comment of comments) {
+      const entry = element("div", "comment");
+      entry.append(element("strong", "", comment.user.display_name), element("p", "full-text", comment.body));
+      list.append(entry);
+    }
+    if (!comments.length) list.append(element("span", "row-meta", "No comments yet."));
+    await api(path + "/read", { method: "POST", scope });
+  }
+  section.addEventListener("toggle", () => {
+    if (section.open) read().catch((error) => notice(error.message));
   });
-  loadUsers();
-
-  const timer = setInterval(() => {
-    if (!document.body.contains(list) || !$("dope-dialog").open) { clearInterval(timer); return; }
-    refresh(true).catch(() => {});
-  }, 15000);
-
-  input.addEventListener("input", () => draftWrite(draftKey, { body: input.value }));
-  setupMentionAutocomplete(input);
-
-  const post = async () => {
-    const body = input.value.trim();
-    if (!body) return;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (send.disabled || !input.value.trim()) return;
     send.disabled = true;
     try {
-      const created = await api(`/api/dopes/${d.id}/comments`, { method: "POST", body: JSON.stringify({ body }) });
-      comments = [...comments, created];
+      await api(path, { method: "POST", scope, body: { body: input.value.trim() } });
+      if (!section.isConnected) return;
       input.value = "";
-      draftRemove(draftKey);
-      renderList();
-      updateDopeInState({ id: d.id, comment_count: comments.length, unread_comments: 0 });
-      render();
-      list.scrollTop = list.scrollHeight;
-    } catch (err) { toast(err.message); }
+      await read();
+    } catch (error) { notice(error.message); }
     finally { send.disabled = false; }
-  };
-  send.onclick = (event) => { event.preventDefault(); post(); };
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); post(); }
   });
 }
 
-function setupMentionAutocomplete(textarea) {
-  const menu = $("mention-menu");
-  if (!menu) return;
-  let items = [];
-  let activeIndex = 0;
-  let context = null;
+async function loadReferences(container, item, scope) {
+  // Recover existing links and images from legacy rich descriptions without inserting their HTML.
+  const full = await api("/api/dopes/" + item.id, { scope });
+  if (!container.isConnected) return;
+  const template = document.createElement("template");
+  template.innerHTML = full.description_html;
+  const urls = new Map(full.commit_links.map((url) => [url, url]));
+  for (const source of template.content.querySelectorAll("a[href]")) {
+    const href = source.getAttribute("href");
+    urls.set(href, source.textContent.trim() || href);
+  }
+  for (const [url, label] of urls) {
+    if (!/^https?:\/\//i.test(url)) continue;
+    const link = element("a", "reference", label);
+    link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer";
+    container.append(link);
+  }
+  for (const source of template.content.querySelectorAll("img[src]")) {
+    const src = source.getAttribute("src");
+    if (!/^(https?:\/\/|data:image\/(png|gif|jpe?g|webp);base64,)/i.test(src)) continue;
+    const img = element("img", "attachment");
+    img.alt = source.alt || "Dope attachment"; img.loading = "lazy"; img.referrerPolicy = "no-referrer";
+    img.src = src; container.append(img);
+  }
+}
 
-  const closeMenu = () => { menu.hidden = true; items = []; context = null; };
-
-  const mentionContext = () => {
-    const pos = textarea.selectionStart;
-    const before = textarea.value.slice(0, pos);
-    const at = before.lastIndexOf("@");
-    if (at === -1) return null;
-    if (at > 0 && /[\w@]/.test(before[at - 1])) return null;
-    const token = before.slice(at + 1);
-    if (token.includes("\n") || token.length > 40) return null;
-    return { at, token };
-  };
-
-  const renderMenu = () => {
-    menu.innerHTML = items.map((u, i) => `
-      <button type="button" class="mention-item ${i === activeIndex ? "is-active" : ""}" data-mention-index="${i}">
-        <span class="online-dot ${u.online ? "is-online" : ""}"></span>
-        <strong>${escapeHtml(u.display_name)}</strong>
-        <small>@${escapeHtml(u.username)}${u.online ? " · online" : ""}</small>
-      </button>
-    `).join("");
-    menu.hidden = !items.length;
-    menu.querySelectorAll("[data-mention-index]").forEach((button) => {
-      button.onmousedown = (event) => { event.preventDefault(); pick(Number(button.dataset.mentionIndex)); };
+function showDetail(item, editing = false) {
+  const dialog = $("detail"), container = $("detail-body");
+  container.replaceChildren(element("p", "field-title", board.name));
+  const title = element("h2", "", editing ? "Edit dope" : item.title);
+  title.id = "detail-title"; container.append(title);
+  if (!editing && item.description && item.description !== item.title) container.append(element("p", "full-text", item.description));
+  container.append(element("span", "row-meta", attribution(item)));
+  if (item.assignee) container.append(element("span", "row-meta", "Taken by " + item.assignee));
+  if (item.note && !editing) container.append(element("p", "full-text", item.note));
+  const actions = element("div", "dialog-actions");
+  function field(labelText, value) {
+    const label = element("label", "", labelText); label.htmlFor = "detail-input";
+    const input = element("textarea"); input.id = label.htmlFor; input.rows = 3;
+    input.maxLength = 20000; input.value = value; container.append(label, input);
+    return input;
+  }
+  if (editing) {
+    const input = field("Description", item.description || item.title);
+    actions.append(button("Save changes", "primary", () => {
+      if (!input.value.trim()) { input.focus(); return; }
+      const body = { description: input.value.trim() };
+      if (item.title !== (item.description || "").split("\n")[0].slice(0, 180)) body.title = item.title;
+      mutate(item, "edit", body);
+    }));
+  } else if (item.status === "active") {
+    if (!item.blocked) {
+      const input = field("Completion note (optional)", "");
+      actions.append(button("Mark done", "primary", () => mutate(item, "complete", { description: input.value.trim() })));
+      if (!item.assigned_to) actions.append(button("Take", "", () => mutate(item, "assign")));
+    }
+    if (item.assigned_to && (item.assigned_to === viewerId || board.can_manage)) {
+      actions.append(button("Release", "", () => mutate(item, "unassign")));
+    }
+    actions.append(button("Edit", "", () => showDetail(item, true)));
+  } else if (item.status === "completed" || item.status === "review") {
+    if (item.status === "review" && board.can_manage) actions.append(button("Approve", "primary", () => mutate(item, "review/approve")));
+    actions.append(button("Reopen", "", () => mutate(item, "uncomplete")));
+  } else {
+    const saved = item.status === "saved";
+    actions.append(button(saved ? "Return to open" : "Restore", "primary", () => mutate(item, saved ? "move-to-active" : "restore")));
+  }
+  container.append(actions);
+  if (!editing) {
+    const references = element("div");
+    container.append(references);
+    loadReferences(references, item, board.id).catch((error) => {
+      if (references.isConnected) notice(error.message);
     });
-    const active = menu.querySelector(".mention-item.is-active");
-    if (active) active.scrollIntoView({ block: "nearest" });
-  };
-
-  const pick = (index) => {
-    const user = items[index];
-    if (!user || !context) return;
-    const pos = textarea.selectionStart;
-    const insert = `@${user.username} `;
-    textarea.value = textarea.value.slice(0, context.at) + insert + textarea.value.slice(pos);
-    const caret = context.at + insert.length;
-    textarea.setSelectionRange(caret, caret);
-    textarea.focus();
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    closeMenu();
-  };
-
-  const openMenu = async () => {
-    context = mentionContext();
-    if (!context) { closeMenu(); return; }
-    const users = await loadUsers();
-    const stillOpen = mentionContext();
-    if (!stillOpen || stillOpen.at !== context.at) return;
-    context = stillOpen;
-    const q = context.token.toLowerCase();
-    items = users
-      .filter((u) => !q || u.username.toLowerCase().includes(q) || u.display_name.toLowerCase().includes(q))
-      .sort((a, b) => (b.online - a.online) || a.display_name.localeCompare(b.display_name))
-      .slice(0, 8);
-    activeIndex = 0;
-    renderMenu();
-  };
-
-  textarea.addEventListener("input", openMenu);
-  textarea.addEventListener("click", openMenu);
-  textarea.addEventListener("blur", () => setTimeout(closeMenu, 150));
-  textarea.addEventListener("keydown", (event) => {
-    if (menu.hidden || !items.length) return;
-    if (event.key === "ArrowDown") { event.preventDefault(); activeIndex = (activeIndex + 1) % items.length; renderMenu(); }
-    else if (event.key === "ArrowUp") { event.preventDefault(); activeIndex = (activeIndex - 1 + items.length) % items.length; renderMenu(); }
-    else if (event.key === "Enter" || event.key === "Tab") { event.preventDefault(); pick(activeIndex); }
-    else if (event.key === "Escape") { event.preventDefault(); closeMenu(); }
-  });
-}
-
-async function openDope(id) {
-  let d = state.dopes.find((item) => item.id === id) || state.allDopes.find((item) => item.id === id);
-  if (!d) {
-    await ensureAllDopes(true);
-    d = state.allDopes.find((item) => item.id === id);
+    addDiscussion(container, item, board.id);
+    if (item.status === "active" || item.status === "completed") {
+      const more = element("details", "secondary-panel");
+      more.append(element("summary", "", "More actions"));
+      const options = element("div", "dialog-actions");
+      if (item.status === "active") options.append(button("Save for later", "", () => mutate(item, "save-for-later")));
+      options.append(button("Archive", "", () => mutate(item, "archive")));
+      more.append(options); container.append(more);
+    }
   }
-  if (!d) return;
-  if (!state.categories.length) await loadCategories();
-  $("modal-title").hidden = true;
-  $("modal-title").textContent = d.title;
-  const versions = d.versions || [];
-  const editCount = Math.max(0, versions.length - 1);
-  const activeVersion = versions[0] || { title: d.title, description_html: d.description_html, edited_at: d.created_at, version_number: 1 };
-  const versionOptions = versions.map((v) => `<option value="${v.version_number}">v${v.version_number} - ${localDate(v.edited_at)} by ${escapeHtml(v.edited_by?.display_name || "someone")}</option>`).join("");
-  const history = d.assignment_history.length ? `
-    <section class="history-block">
-      <h2>Assignment History</h2>
-      <ul class="history">${d.assignment_history.map((h) => `<li>${assignmentHistoryLine(d, h)}</li>`).join("")}</ul>
-    </section>
-  ` : "";
-  const completionNotes = d.completion_description ? `
-    <section class="completion-notes">
-      <h2>Completion Notes</h2>
-      <div class="completion-text">${linkifyText(d.completion_description)}</div>
-    </section>
-  ` : "";
-  const review = d.review || {};
-  const reviewDetails = review.requested_at ? `
-    <section class="review-block">
-      <h2>Review</h2>
-      <div class="review-panel">
-        <div class="review-row">
-          <span>Sent by</span>
-          <strong>${escapeHtml(review.requested_by?.display_name || d.completed_by?.display_name || "someone")} on ${localDate(review.requested_at)}</strong>
-        </div>
-        ${review.branch_url ? `<div class="review-row"><span>Branch</span><a href="${escapeHtml(review.branch_url)}" target="_blank" rel="noreferrer">${escapeHtml(review.branch_url)}</a></div>` : ""}
-        ${review.note ? `<div class="review-note">${linkifyText(review.note)}</div>` : ""}
-        ${review.approved_at ? `<div class="review-outcome is-approved"><i class="ph ph-check-circle"></i>Approved by ${escapeHtml(review.approved_by?.display_name || "someone")} on ${localDate(review.approved_at)}</div>` : ""}
-        ${review.rejected_at ? `<div class="review-outcome is-rejected"><i class="ph ph-x-circle"></i>Rejected by ${escapeHtml(review.rejected_by?.display_name || "someone")} on ${localDate(review.rejected_at)}</div>` : ""}
-        ${review.rejection_note ? `<div class="review-note is-rejection">${linkifyText(review.rejection_note)}</div>` : ""}
-        ${review.followup_id ? `<button type="button" class="dependency-link is-undoped" data-review-open="${review.followup_id}" value="default"><span>Open review changes</span><small>#${review.followup_id}</small></button>` : ""}
-      </div>
-    </section>
-  ` : review.parent_id ? `
-    <section class="review-block">
-      <h2>Review changes</h2>
-      <div class="review-panel">
-        <button type="button" class="dependency-link" data-review-open="${review.parent_id}" value="default"><span>Original reviewed dope</span><small>#${review.parent_id}</small></button>
-      </div>
-    </section>
-  ` : "";
-  const blocked = (d.blocked_dependencies || []).length > 0;
-  const sortedDependencies = [...(d.dependencies || [])].sort((a, b) => {
-    const aUndoped = a.status !== "completed";
-    const bUndoped = b.status !== "completed";
-    if (aUndoped !== bUndoped) return aUndoped ? -1 : 1;
-    return a.title.localeCompare(b.title);
-  });
-  const dependencyCount = sortedDependencies.length;
-  const undopedCount = sortedDependencies.filter((dep) => dep.status !== "completed").length;
-  const dependencyLabel = `${dependencyCount} ${dependencyCount === 1 ? "dependency" : "dependencies"} &bull; ${undopedCount} undoped`;
-  const dependencies = dependencyCount ? `
-    <section class="dependency-links-wrap">
-      <h2>Dependencies</h2>
-      <button id="dependency-summary" class="dependency-summary" value="default">
-        <span>${dependencyLabel}</span>
-        <i class="ph ph-caret-down"></i>
-      </button>
-      <div id="dependency-links" class="dependency-links" hidden>
-        ${sortedDependencies.map((dep) => `<button class="dependency-link ${dep.status !== "completed" ? "is-undoped" : ""}" data-dependency-open="${dep.id}" value="default">
-          <span>${escapeHtml(dep.title)}</span>
-          <small>${dep.status === "completed" ? "Doped" : "Undoped"}</small>
-        </button>`).join("")}
-      </div>
-    </section>
-  ` : "";
-  const sortedDependents = [...(d.dependents || [])].sort((a, b) => {
-    if ((a.depth || 1) !== (b.depth || 1)) return (a.depth || 1) - (b.depth || 1);
-    return a.title.localeCompare(b.title);
-  });
-  const dependentCount = sortedDependents.length;
-  const dependents = dependentCount ? `
-    <section class="dependency-links-wrap">
-      <h2>Dependents</h2>
-      <button id="dependent-summary" class="dependency-summary" value="default">
-        <span>${dependentCount} ${dependentCount === 1 ? "dependent" : "dependents"}</span>
-        <i class="ph ph-caret-down"></i>
-      </button>
-      <div id="dependent-links" class="dependency-links" hidden>
-        ${sortedDependents.map((dep) => `<button class="dependency-link ${dep.depth > 1 ? "is-indirect" : ""}" data-dependent-open="${dep.id}" value="default">
-          <span>${escapeHtml(dep.title)}</span>
-          <small>${dep.depth > 1 ? "Chain" : "Direct"} - ${formatMinutes(dep.time_minutes)}</small>
-        </button>`).join("")}
-      </div>
-    </section>
-  ` : "";
-  $("modal-body").innerHTML = `
-    <div id="modal-topbar" class="modal-topbar"><strong>${escapeHtml(d.title)}</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
-    <div class="modal-content">
-      <div id="modal-title-sentinel"></div>
-      <div class="modal-headline">
-        <div>
-          <span class="pill"><i class="ph ph-clock"></i>${formatMinutes(d.time_minutes)}</span>
-          ${d.assigned_to ? `<span class="pill"><i class="ph ph-user"></i>${escapeHtml(d.assigned_to.display_name)}</span>` : ""}
-          ${d.completed_by ? `<span class="pill"><i class="ph ph-check-circle"></i>${escapeHtml(d.completed_by.display_name)} on ${localDate(d.completed_at)}</span>` : ""}
-          ${d.status === "saved" ? `<span class="pill saved-pill"><i class="ph ph-bookmark-simple"></i>Saved ${localDate(d.saved_at)}</span>` : ""}
-        </div>
-        <div class="version-control">
-          ${editCount ? `<button id="version-toggle" class="version-button" value="default">${editCount} ${editCount === 1 ? "edit" : "edits"}</button>` : `<span class="version-empty">no edits</span>`}
-        </div>
-      </div>
-      ${inlineCategoryHtml(d)}
-      ${editCount ? `<label id="version-picker-wrap" class="version-picker" hidden>Read version<select id="version-picker">${versionOptions}</select></label>` : ""}
-      <h2 id="dope-version-title">${escapeHtml(activeVersion.title)}</h2>
-      ${dependencies}
-      ${dependents}
-      <div id="dope-version-description" class="description">${sanitizeHtml(activeVersion.description_html)}</div>
-      ${completionNotes}
-      ${reviewDetails}
-      ${history}
-      ${commentsSectionHtml()}
-    </div>
-    <div class="modal-action-bar">
-      ${d.status === "active" && blocked ? `<button class="primary-wide" value="default" disabled><i class="ph ph-warning-circle"></i>Dependencies Undoped</button>` : ""}
-      ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="assign" class="primary-wide" value="default"><i class="ph ph-target"></i>I'll take it</button>` : ""}
-      ${d.status === "active" && !blocked && d.assigned_to ? `<button id="complete" class="primary-wide" value="default"><i class="ph ph-confetti"></i>Doped</button>` : ""}
-      ${d.status === "saved" ? `<button id="move-to-active" class="primary-wide" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Move to Active</button>` : ""}
-      ${d.status === "review" && isReviewer() ? `<button id="approve-review" class="primary-wide" value="default"><i class="ph ph-check-circle"></i>Doped</button>` : ""}
-      <div class="modal-action-row">
-        ${d.status !== "archived" ? `<button id="edit-dope" class="icon-action secondary" value="default" title="Edit"><i class="ph ph-pencil-simple"></i></button>` : ""}
-        ${d.status !== "archived" ? `<button id="archive" class="icon-action danger" value="default" title="Archive"><i class="ph ph-archive"></i></button>` : `<button id="restore" class="secondary" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Restore</button>`}
-        ${d.status === "active" && d.assigned_to ? `<button id="unassign" class="non-cta" value="default"><i class="ph ph-user-minus"></i>Unassign Dope</button>` : ""}
-        ${d.status === "active" ? `<button id="save-later" class="secondary action-text" value="default"><i class="ph ph-bookmark-simple"></i>Save for later</button>` : ""}
-        ${d.status === "active" && !blocked ? `<button id="send-review" class="secondary action-text" value="default"><i class="ph ph-git-branch"></i>Send for Review</button>` : ""}
-        ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="complete" class="secondary action-text" value="default"><i class="ph ph-confetti"></i>Doped</button>` : ""}
-        ${d.status === "review" && isReviewer() ? `<button id="reject-review" class="danger action-text" value="default"><i class="ph ph-x-circle"></i>Reject</button>` : ""}
-        ${d.status === "completed" ? `<button id="uncomplete" class="secondary action-text" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Mark Not Completed</button>` : ""}
-      </div>
-    </div>
-  `;
-  document.querySelectorAll("[data-dependency-open]").forEach((el) => {
-    el.onclick = (event) => {
-      event.preventDefault();
-      openDope(Number(el.dataset.dependencyOpen));
-    };
-  });
-  document.querySelectorAll("[data-dependent-open]").forEach((el) => {
-    el.onclick = (event) => {
-      event.preventDefault();
-      openDope(Number(el.dataset.dependentOpen));
-    };
-  });
-  document.querySelectorAll("[data-review-open]").forEach((el) => {
-    el.onclick = (event) => {
-      event.preventDefault();
-      openDope(Number(el.dataset.reviewOpen));
-    };
-  });
-  const dependencySummary = $("dependency-summary");
-  const dependencyLinks = $("dependency-links");
-  if (dependencySummary && dependencyLinks) {
-    dependencySummary.onclick = (event) => {
-      event.preventDefault();
-      dependencyLinks.hidden = !dependencyLinks.hidden;
-      dependencySummary.classList.toggle("is-open", !dependencyLinks.hidden);
-    };
-  }
-  const dependentSummary = $("dependent-summary");
-  const dependentLinks = $("dependent-links");
-  if (dependentSummary && dependentLinks) {
-    dependentSummary.onclick = (event) => {
-      event.preventDefault();
-      dependentLinks.hidden = !dependentLinks.hidden;
-      dependentSummary.classList.toggle("is-open", !dependentLinks.hidden);
-    };
-  }
-  bindDopeActions(d);
-  bindVersionControls(d);
-  bindInlineCategory(d);
-  bindComments(d);
-  $("dope-dialog").showModal();
-  bindModalChrome(d.title);
+  if (!dialog.open) dialog.showModal();
 }
 
-function bindDopeActions(d) {
-  const closeReload = async (message) => {
-    $("dope-dialog").close();
-    await loadRoute();
-    toast(message);
-  };
-  const edit = $("edit-dope");
-  if (edit) edit.onclick = (event) => { event.preventDefault(); openEditDope(d); };
-  const assign = $("assign");
-  if (assign) assign.onclick = async (event) => { event.preventDefault(); await api(`/api/dopes/${d.id}/assign`, { method: "POST" }); await closeReload("Dope assigned"); };
-  const unassign = $("unassign");
-  if (unassign) unassign.onclick = (event) => { event.preventDefault(); openUnassignDope(d); };
-  const complete = $("complete");
-  if (complete) complete.onclick = (event) => { event.preventDefault(); openCompleteDope(d); };
-  const saveLater = $("save-later");
-  if (saveLater) saveLater.onclick = async (event) => {
-    event.preventDefault();
-    await api(`/api/dopes/${d.id}/save-for-later`, { method: "POST" });
-    $("dope-dialog").close();
-    await loadRoute();
-    toast("Dope saved for later", async () => {
-      await api(`/api/dopes/${d.id}/move-to-active`, { method: "POST" });
-      await loadRoute();
-      toast("Dope moved back to Active");
-    });
-  };
-  const moveToActive = $("move-to-active");
-  if (moveToActive) moveToActive.onclick = async (event) => {
-    event.preventDefault();
-    await api(`/api/dopes/${d.id}/move-to-active`, { method: "POST" });
-    await closeReload("Dope moved back to Active");
-  };
-  const sendReview = $("send-review");
-  if (sendReview) sendReview.onclick = (event) => { event.preventDefault(); openReviewDope(d); };
-  const approveReview = $("approve-review");
-  if (approveReview) approveReview.onclick = async (event) => {
-    event.preventDefault();
-    await api(`/api/dopes/${d.id}/review/approve`, { method: "POST" });
-    await closeReload("Review approved");
-  };
-  const rejectReview = $("reject-review");
-  if (rejectReview) rejectReview.onclick = (event) => { event.preventDefault(); openRejectReview(d); };
-  const uncomplete = $("uncomplete");
-  if (uncomplete) uncomplete.onclick = async (event) => {
-    event.preventDefault();
-    if (!confirm("Mark this dope as not completed?")) return;
-    await api(`/api/dopes/${d.id}/uncomplete`, { method: "POST" });
-    await closeReload("Dope marked not completed");
-  };
-  const archive = $("archive");
-  if (archive) archive.onclick = async (event) => {
-    event.preventDefault();
-    if (!confirm("Archive this dope?")) return;
-    await api(`/api/dopes/${d.id}/archive`, { method: "POST" });
-    $("dope-dialog").close();
-    await loadRoute();
-    toast("Dope archived", async () => { await api(`/api/dopes/${d.id}/restore`, { method: "POST" }); await loadRoute(); toast("Archive undone"); });
-  };
-  const restore = $("restore");
-  if (restore) restore.onclick = async (event) => { event.preventDefault(); await api(`/api/dopes/${d.id}/restore`, { method: "POST" }); await closeReload("Dope restored"); };
-}
-
-function openUnassignDope(d) {
-  const draftKey = `unassign:${d.id}`;
-  const draft = draftRead(draftKey);
-  $("modal-title").hidden = true;
-  $("modal-title").textContent = "Unassign Dope";
-  $("modal-body").innerHTML = `
-    <div class="modal-topbar is-visible"><strong>Unassign Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
-    <div class="modal-content">
-      <h2>${escapeHtml(d.title)}</h2>
-      <label>Reason<input id="unassign-reason" name="dope_unassign_reason" autocomplete="off" maxlength="500" required placeholder="What blocked this?" value="${escapeHtml(draft.reason || "")}"></label>
-    </div>
-    <div class="modal-action-bar">
-      <button id="confirm-unassign" class="primary-wide" value="default"><i class="ph ph-user-minus"></i>Unassign Dope</button>
-    </div>
-  `;
-  bindDraftFields(draftKey, [["reason", "unassign-reason"]]);
-  $("confirm-unassign").onclick = async (event) => {
-    event.preventDefault();
-    try {
-      await api(`/api/dopes/${d.id}/unassign`, {
-        method: "POST",
-        body: JSON.stringify({ reason: $("unassign-reason").value }),
-      });
-      draftRemove(draftKey);
-      $("dope-dialog").close();
-      await loadRoute();
-      toast("Dope unassigned");
-    } catch (err) { toast(err.message); }
-  };
-  $("unassign-reason").focus();
-}
-
-function bindVersionControls(d) {
-  const toggle = $("version-toggle");
-  const wrap = $("version-picker-wrap");
-  const picker = $("version-picker");
-  if (!toggle || !wrap || !picker) return;
-  toggle.onclick = (event) => {
-    event.preventDefault();
-    wrap.hidden = !wrap.hidden;
-  };
-  picker.onchange = () => {
-    const version = (d.versions || []).find((v) => String(v.version_number) === picker.value);
-    if (!version) return;
-    $("dope-version-title").textContent = version.title;
-    $("dope-version-description").innerHTML = sanitizeHtml(version.description_html);
-  };
-}
-
-function bindModalChrome(title) {
-  const modal = document.querySelector("#dope-dialog .modal");
-  const topbar = $("modal-topbar");
-  if (!modal || !topbar) return;
-  topbar.classList.remove("is-visible");
-  topbar.querySelector("strong").textContent = title;
-  modal.onscroll = () => {
-    topbar.classList.toggle("is-visible", modal.scrollTop > 90);
-  };
-}
-
-async function openEditDope(d) {
-  await Promise.all([ensureAllDopes(true), loadCategories()]);
-  const draftKey = `edit-dope:${d.id}`;
-  const draft = draftRead(draftKey);
-  const selectedDeps = draft.dependency_ids || (d.dependencies || []).map((dep) => dep.id);
-  const selectedCategory = draft.category_id !== undefined ? draft.category_id : (d.category ? d.category.id : null);
-  $("modal-title").hidden = true;
-  $("modal-title").textContent = "Edit Dope";
-  $("modal-body").innerHTML = `
-    <div class="modal-topbar is-visible"><strong>Edit Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
-    <div class="modal-content">
-      <label>Title<input id="edit-title" name="dope_edit_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" value="${escapeHtml(draft.title || d.title)}"></label>
-      <label>Description<div id="edit-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(draft.description_html || d.description_html)}</div></label>
-      <label>Time to complete<input id="edit-time" name="dope_edit_time" autocomplete="off" placeholder="2hr, 30min, 0.5hr" value="${escapeHtml(draft.time_text || formatMinutes(d.time_minutes))}"></label>
-      ${categoryPickerHtml(selectedCategory)}
-      ${dependencyPickerHtml(selectedDeps, d.id)}
-    </div>
-    <div class="modal-action-bar">
-      <button id="save-edit" class="primary-wide" value="default"><i class="ph ph-floppy-disk"></i>Save edit</button>
-    </div>
-  `;
-  wireEditor($("edit-description"));
-  bindCategoryPicker();
-  bindDependencyPicker(selectedDeps.length > 0);
-  preventSearchSubmit($("modal-body"));
-  bindDraftFields(draftKey, [
-    ["title", "edit-title"],
-    ["description_html", "edit-description", "html"],
-    ["time_text", "edit-time"],
-    ["category_id", "category-picker", "category"],
-    ["dependency_ids", "dependency-panel", "checked-list"],
-  ]);
-  $("save-edit").onclick = async (event) => {
-    event.preventDefault();
-    try {
-      const updated = await api(`/api/dopes/${d.id}`, {
-        method: "PUT",
-        body: JSON.stringify({
-          title: $("edit-title").value,
-          description_html: sanitizeHtml($("edit-description").innerHTML),
-          time_text: $("edit-time").value,
-          category_id: selectedCategoryId(),
-          dependency_ids: selectedDependencyIds(),
-        }),
-      });
-      state.dopes = state.dopes.map((item) => item.id === updated.id ? updated : item);
-      state.allDopes = state.allDopes.map((item) => item.id === updated.id ? updated : item);
-      draftRemove(draftKey);
-      toast("Edit saved");
-      await openDope(updated.id);
-    } catch (err) { toast(err.message); }
-  };
-}
-
-async function openCompleteDope(d) {
-  const draftKey = `complete:${d.id}`;
-  const draft = draftRead(draftKey);
-  const completionUsers = canCompleteForOthers()
-    ? (await loadUsers()).filter((user) => user.id !== state.user.id)
-    : [];
-  const completionUserOptions = completionUsers.map((user) =>
-    `<option value="${user.id}">${escapeHtml(user.display_name)} (@${escapeHtml(user.username)})</option>`
-  ).join("");
-  $("modal-title").hidden = true;
-  $("modal-title").textContent = "Doped";
-  $("modal-body").innerHTML = `
-    <div class="modal-topbar is-visible"><strong>Doped</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
-    <div class="modal-content">
-      <h2>${escapeHtml(d.title)}</h2>
-      <label>Doped description with commit links<textarea id="completion-text" rows="12" placeholder="Write what changed and include at least one commit link">${escapeHtml(draft.completion_text || "")}</textarea></label>
-      ${canCompleteForOthers() ? `
-        <label class="filter-check"><input id="complete-for-other" type="checkbox">Doped for someone else</label>
-        <label id="complete-for-user-wrap" hidden>Who is it for?
-          <select id="complete-for-user">
-            <option value="">Choose a person</option>
-            ${completionUserOptions}
-          </select>
-        </label>
-      ` : ""}
-    </div>
-    <div class="modal-action-bar">
-      <button id="confirm-complete" class="primary-wide" value="default"><i class="ph ph-confetti"></i>Doped</button>
-    </div>
-  `;
-  bindDraftFields(draftKey, [["completion_text", "completion-text"]]);
-  const completeForOther = $("complete-for-other");
-  const completeForUserWrap = $("complete-for-user-wrap");
-  if (completeForOther && completeForUserWrap) {
-    completeForOther.onchange = () => {
-      completeForUserWrap.hidden = !completeForOther.checked;
-      if (completeForOther.checked) $("complete-for-user").focus();
-    };
-  }
-  $("confirm-complete").onclick = async (event) => {
-    event.preventDefault();
-    try {
-      const completedForUserId = completeForOther?.checked ? Number($("complete-for-user").value) : null;
-      if (completeForOther?.checked && !completedForUserId) {
-        toast("Choose who this dope is for");
-        return;
+async function write(path, method, body, onSuccess) {
+  if (busy || !loaded || !board) return;
+  const id = board.id, uuid = account.uuid;
+  busy = true; updateComposer(); notice();
+  try {
+    await api(path, { scope: id, method, body });
+    if (board?.id !== id || account?.uuid !== uuid) return;
+    onSuccess();
+    await refreshBoard();
+  } catch (error) {
+    if (board?.id !== id || account?.uuid !== uuid) return;
+    if (error.status === 401) signIn("Sign in again to open your boards.");
+    else {
+      if ([403, 409].includes(error.status)) {
+        $("detail").close();
+        await loadContext();
       }
-      await api(`/api/dopes/${d.id}/complete`, {
-        method: "POST",
-        body: JSON.stringify({
-          completion_text: $("completion-text").value,
-          completed_for_user_id: completedForUserId,
-        }),
-      });
-      draftRemove(draftKey);
-      $("dope-dialog").close();
-      await loadRoute();
-      celebrateDope();
-      toast("Dope completed");
-    } catch (err) { toast(err.message); }
-  };
-}
-
-function openReviewDope(d) {
-  const draftKey = `review:${d.id}`;
-  const draft = draftRead(draftKey);
-  $("modal-title").hidden = true;
-  $("modal-title").textContent = "Send for Review";
-  $("modal-body").innerHTML = `
-    <div class="modal-topbar is-visible"><strong>Send for Review</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
-    <div class="modal-content">
-      <h2>${escapeHtml(d.title)}</h2>
-      <label>Reviewer note<textarea id="review-note" rows="8" placeholder="What should the reviewer check?">${escapeHtml(draft.note || "")}</textarea></label>
-      <label>Review branch link<input id="review-branch" name="dope_review_branch" autocomplete="off" placeholder="https://github.com/team/repo/tree/review-branch" value="${escapeHtml(draft.branch_url || "")}"></label>
-    </div>
-    <div class="modal-action-bar">
-      <button id="confirm-review" class="primary-wide" value="default"><i class="ph ph-git-branch"></i>Send for Review</button>
-    </div>
-  `;
-  bindDraftFields(draftKey, [["note", "review-note"], ["branch_url", "review-branch"]]);
-  $("confirm-review").onclick = async (event) => {
-    event.preventDefault();
-    try {
-      await api(`/api/dopes/${d.id}/review`, {
-        method: "POST",
-        body: JSON.stringify({ note: $("review-note").value, branch_url: $("review-branch").value }),
-      });
-      draftRemove(draftKey);
-      $("dope-dialog").close();
-      await loadRoute();
-      toast("Sent for review");
-    } catch (err) { toast(err.message); }
-  };
-}
-
-function openRejectReview(d) {
-  const draftKey = `reject-review:${d.id}`;
-  const draft = draftRead(draftKey);
-  $("modal-title").hidden = true;
-  $("modal-title").textContent = "Reject Review";
-  $("modal-body").innerHTML = `
-    <div class="modal-topbar is-visible"><strong>Reject Review</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
-    <div class="modal-content">
-      <h2>${escapeHtml(d.title)}</h2>
-      <label>Reviewer notes<textarea id="review-reject-note" rows="8" placeholder="What needs to change?">${escapeHtml(draft.note || "")}</textarea></label>
-      <label>Remaining time<input id="review-reject-time" name="dope_review_reject_time" autocomplete="off" placeholder="30min, 2hr" value="${escapeHtml(draft.time_text || formatMinutes(d.time_minutes))}"></label>
-    </div>
-    <div class="modal-action-bar">
-      <button id="confirm-reject-review" class="primary-wide danger" value="default"><i class="ph ph-x-circle"></i>Reject Review</button>
-    </div>
-  `;
-  bindDraftFields(draftKey, [["note", "review-reject-note"], ["time_text", "review-reject-time"]]);
-  $("confirm-reject-review").onclick = async (event) => {
-    event.preventDefault();
-    try {
-      await api(`/api/dopes/${d.id}/review/reject`, {
-        method: "POST",
-        body: JSON.stringify({ note: $("review-reject-note").value, time_text: $("review-reject-time").value }),
-      });
-      draftRemove(draftKey);
-      $("dope-dialog").close();
-      if (location.hash !== "#active") location.hash = "active";
-      else await loadRoute();
-      toast("Review rejected");
-    } catch (err) { toast(err.message); }
-  };
-}
-
-function formatResetCountdown(milliseconds) {
-  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  return `${String(hours).padStart(2, "0")}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
-}
-
-function startSettingsCountdown(nextResetAt) {
-  clearInterval(state.settingsTimer);
-  let resetAt = Date.parse(nextResetAt);
-  if (!Number.isFinite(resetAt)) return;
-  state.nextResetAt = new Date(resetAt).toISOString();
-  const tick = () => {
-    if (!$("settings-dialog").open) {
-      clearInterval(state.settingsTimer);
-      state.settingsTimer = null;
-      return;
+      notice(error.message || "The change could not be saved.");
     }
-    const now = Date.now();
-    if (resetAt <= now) {
-      resetAt += 24 * 60 * 60 * 1000;
-      state.nextResetAt = new Date(resetAt).toISOString();
-      refreshVisibleData({ force: true });
-      scheduleDopeDayRefresh();
-    }
-    $("settings-reset-countdown").textContent = formatResetCountdown(resetAt - now);
-    $("settings-next-reset").textContent = `Resets ${new Date(resetAt).toLocaleString(undefined, {
-      timeZone: "Asia/Kolkata",
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    })} IST`;
-  };
-  tick();
-  state.settingsTimer = setInterval(tick, 1000);
-}
-
-async function openSettings() {
-  if (!canManageSettings()) return;
-  $("settings-reset-countdown").textContent = "Loading…";
-  $("settings-next-reset").textContent = "Loading IST reset…";
-  $("settings-dialog").showModal();
-  try {
-    const settings = await api("/api/settings/dope-day");
-    $("settings-reset-time").value = settings.reset_time;
-    startSettingsCountdown(settings.next_reset_at);
-  } catch (err) {
-    $("settings-dialog").close();
-    toast(err.message);
-    return;
-  }
-  $("settings-save").onclick = async (event) => {
-    event.preventDefault();
-    try {
-      const settings = await api("/api/settings/dope-day", {
-        method: "PUT",
-        body: JSON.stringify({ reset_time: $("settings-reset-time").value }),
-      });
-      startSettingsCountdown(settings.next_reset_at);
-      scheduleDopeDayRefresh();
-      await loadRoute();
-      toast("Reset time saved");
-    } catch (err) { toast(err.message); }
-  };
-  $("settings-dialog").onclose = () => {
-    clearInterval(state.settingsTimer);
-    state.settingsTimer = null;
-  };
-}
-
-function syncProfileColorInputs(source) {
-  const color = source === "hex" ? $("profile-color-hex").value : $("profile-color").value;
-  if (!/^#[0-9a-fA-F]{6}$/.test(color)) return;
-  $("profile-color").value = color;
-  $("profile-color-hex").value = color.toLowerCase();
-  $("profile-color-preview").style.background = color;
-  document.querySelectorAll("[data-profile-color]").forEach((button) => {
-    button.classList.toggle("is-selected", button.dataset.profileColor.toLowerCase() === color.toLowerCase());
-  });
-}
-
-function renderApiKeys(keys = []) {
-  const list = $("api-key-list");
-  if (!list) return;
-  const rows = keys.length ? keys.map((key) => `
-    <div class="api-key-row ${key.revoked_at ? "is-revoked" : ""}">
-      <span>
-        <strong>${escapeHtml(key.name)}</strong>
-        <small>${escapeHtml(key.prefix)}... · created ${localDate(key.created_at)}${key.last_used_at ? ` · used ${localDate(key.last_used_at)}` : ""}${key.revoked_at ? " · revoked" : ""}</small>
-      </span>
-      ${key.revoked_at ? "" : `<button class="danger" type="button" data-api-key-revoke="${key.id}"><i class="ph ph-trash"></i>Delete key</button>`}
-    </div>
-  `).join("") : `<p class="empty mini">No API keys yet.</p>`;
-  list.innerHTML = rows;
-  document.querySelectorAll("[data-api-key-revoke]").forEach((button) => {
-    button.onclick = async (event) => {
-      event.preventDefault();
-      if (!confirm("Delete this API key? Anything using it will stop working.")) return;
-      await api(`/api/me/keys/${button.dataset.apiKeyRevoke}`, { method: "DELETE" });
-      await loadApiKeys();
-      toast("API key deleted");
-    };
-  });
-}
-
-async function loadApiKeys() {
-  try {
-    renderApiKeys(await api("/api/me/keys"));
-  } catch (err) {
-    renderApiKeys([]);
+  } finally {
+    busy = false;
+    updateComposer();
+    if (loaded) renderList();
   }
 }
 
-function openProfile() {
-  const draft = draftRead("profile", {});
-  const displayName = draft.display_name || state.user.display_name || "";
-  const color = draft.color || state.user.color || DEFAULT_COLOR;
-  $("profile-display-name").value = displayName;
-  $("profile-color").value = color;
-  $("profile-color-hex").value = color;
-  syncProfileColorInputs("color");
-  $("profile-display-name").oninput = () => draftWrite("profile", { display_name: $("profile-display-name").value, color: $("profile-color").value });
-  $("profile-color").oninput = () => {
-    syncProfileColorInputs("color");
-    draftWrite("profile", { display_name: $("profile-display-name").value, color: $("profile-color").value });
-  };
-  $("profile-color-hex").oninput = () => {
-    syncProfileColorInputs("hex");
-    draftWrite("profile", { display_name: $("profile-display-name").value, color: $("profile-color").value });
-  };
-  document.querySelectorAll("[data-profile-color]").forEach((button) => {
-    button.onclick = (event) => {
-      event.preventDefault();
-      $("profile-color").value = button.dataset.profileColor;
-      syncProfileColorInputs("color");
-      draftWrite("profile", { display_name: $("profile-display-name").value, color: $("profile-color").value });
-    };
-  });
-  $("api-key-created").hidden = true;
-  $("api-key-value").textContent = "";
-  $("api-key-name").value = "";
-  $("api-key-create").onclick = async (event) => {
-    event.preventDefault();
-    try {
-      const created = await api("/api/me/keys", {
-        method: "POST",
-        body: JSON.stringify({ name: $("api-key-name").value || "API key" }),
-      });
-      $("api-key-value").textContent = created.key;
-      $("api-key-created").hidden = false;
-      $("api-key-name").value = "";
-      await loadApiKeys();
-    } catch (err) { toast(err.message); }
-  };
-  $("api-key-copy").onclick = async (event) => {
-    event.preventDefault();
-    const value = $("api-key-value").textContent;
-    if (!value) return;
-    try {
-      await navigator.clipboard.writeText(value);
-      toast("API key copied");
-    } catch {
-      toast("Could not copy key");
-    }
-  };
-  loadApiKeys();
-  $("profile-save").onclick = async (event) => {
-    event.preventDefault();
-    try {
-      state.user = await api("/api/me", {
-        method: "PATCH",
-        body: JSON.stringify({
-          display_name: $("profile-display-name").value,
-          color: $("profile-color").value,
-        }),
-      });
-      cacheWrite("me", state.user);
-      draftRemove("profile");
-      showApp();
-      $("profile-dialog").close();
-      await loadRoute();
-      toast("Profile saved");
-    } catch (err) { toast(err.message); }
-  };
-  $("profile-dialog").showModal();
-}
-
-function renderFilterCategories() {
-  const host = $("filter-categories");
-  if (!host) return;
-  const selected = new Set((state.filters.categoryIds || []).map(Number));
-  const chips = state.categories.map((cat) => `
-    <button type="button" class="category-choice ${selected.has(cat.id) ? "is-selected" : ""}" data-filter-category="${cat.id}" style="--accent:${escapeHtml(cat.color)}">
-      <span class="category-dot"></span>${escapeHtml(cat.name)}
-    </button>
-  `).join("");
-  const none = `<button type="button" class="category-choice category-choice-none ${selected.has(0) ? "is-selected" : ""}" data-filter-category="0">Uncategorized</button>`;
-  host.innerHTML = `${chips}${none}`;
-  host.querySelectorAll("[data-filter-category]").forEach((button) => {
-    button.onclick = (event) => {
-      event.preventDefault();
-      button.classList.toggle("is-selected");
-    };
+function mutate(item, action, body) {
+  const base = "/api/dopes/" + item.id;
+  return write(action === "edit" ? base : base + "/" + action, action === "edit" ? "PUT" : "POST", body, () => {
+    $("detail").close();
+    if (action === "complete") notice("Marked done.");
   });
 }
 
-function selectedFilterCategoryIds() {
-  return [...document.querySelectorAll("#filter-categories [data-filter-category].is-selected")].map((b) => Number(b.dataset.filterCategory));
-}
-
-function categoryManageRow(cat) {
-  return `
-    <div class="category-manage-row" data-category-row="${cat.id}">
-      <input class="category-row-color" type="color" value="${escapeHtml(cat.color)}" data-category-color-input="${cat.id}" aria-label="Color for ${escapeHtml(cat.name)}">
-      <input class="category-row-name" value="${escapeHtml(cat.name)}" maxlength="60" data-category-name-input="${cat.id}" aria-label="Name for ${escapeHtml(cat.name)}">
-      <button type="button" class="secondary category-row-save" data-category-save="${cat.id}" title="Save"><i class="ph ph-check"></i></button>
-      <button type="button" class="danger category-row-delete" data-category-delete="${cat.id}" title="Delete"><i class="ph ph-trash"></i></button>
-    </div>
-  `;
-}
-
-function renderCategoryManageList() {
-  const list = $("category-list");
-  if (!list) return;
-  list.innerHTML = state.categories.length
-    ? state.categories.map(categoryManageRow).join("")
-    : `<p class="empty mini">No categories yet. Add your first below.</p>`;
-  list.querySelectorAll("[data-category-save]").forEach((button) => {
-    button.onclick = async (event) => {
-      event.preventDefault();
-      const id = button.dataset.categorySave;
-      const name = list.querySelector(`[data-category-name-input="${id}"]`).value.trim();
-      const color = list.querySelector(`[data-category-color-input="${id}"]`).value;
-      if (!name) { toast("Category name is required"); return; }
-      try {
-        await api(`/api/categories/${id}`, { method: "PATCH", body: JSON.stringify({ name, color }) });
-        await refreshCategories();
-        toast("Category saved");
-      } catch (err) { toast(err.message); }
-    };
-  });
-  list.querySelectorAll("[data-category-delete]").forEach((button) => {
-    button.onclick = async (event) => {
-      event.preventDefault();
-      const id = button.dataset.categoryDelete;
-      const cat = categoryById(id);
-      if (!confirm(`Delete "${cat ? cat.name : "this category"}"? Dopes in it will become uncategorized.`)) return;
-      try {
-        await api(`/api/categories/${id}`, { method: "DELETE" });
-        await refreshCategories();
-        toast("Category deleted");
-      } catch (err) { toast(err.message); }
-    };
-  });
-}
-
-async function refreshCategories() {
-  await loadCategories(true);
-  renderCategoryManageList();
-  render();
-}
-
-function openCategories() {
-  renderCategoryManageList();
-  loadCategories(true).then(renderCategoryManageList).catch(() => {});
-  const colorInput = $("category-new-color");
-  $("category-new-name").value = "";
-  document.querySelectorAll("[data-category-color]").forEach((button) => {
-    button.classList.toggle("is-selected", button.dataset.categoryColor === colorInput.value);
-    button.onclick = (event) => {
-      event.preventDefault();
-      colorInput.value = button.dataset.categoryColor;
-      document.querySelectorAll("[data-category-color]").forEach((b) => b.classList.toggle("is-selected", b === button));
-    };
-  });
-  $("category-add").onclick = async (event) => {
-    event.preventDefault();
-    const name = $("category-new-name").value.trim();
-    if (!name) { toast("Category name is required"); return; }
-    try {
-      await api("/api/categories", { method: "POST", body: JSON.stringify({ name, color: colorInput.value }) });
-      $("category-new-name").value = "";
-      await refreshCategories();
-      toast("Category added");
-    } catch (err) { toast(err.message); }
-  };
-  $("categories-dialog").showModal();
-}
-
-const ACTIVITY_META = {
-  created: { icon: "ph-plus-circle", verb: "created" },
-  assigned: { icon: "ph-target", verb: "started" },
-  unassigned: { icon: "ph-user-minus", verb: "stepped away from" },
-  completed: { icon: "ph-confetti", verb: "doped" },
-  reviewed: { icon: "ph-git-branch", verb: "sent for review" },
-  archived: { icon: "ph-archive", verb: "archived" },
-  commented: { icon: "ph-chat-circle", verb: "commented on" },
-  edited: { icon: "ph-pencil-simple", verb: "edited" },
-};
-
-// Chart-safe status trio: same hues as the app tokens, chroma-corrected so the
-// marks pass the contrast + colorblind checks on the paper surface.
-const DIAG_STATUS = [
-  { key: "ready", label: "Ready to pick", color: "#2e8b57" },
-  { key: "in_progress", label: "In progress", color: "#2a6f9e" },
-  { key: "blocked", label: "Blocked", color: "#9a4d42" },
-];
-
-const DIAG_WINDOWS = [
-  { key: "7d", label: "7d", count: "completed_7d_count", minutes: "completed_7d_minutes" },
-  { key: "30d", label: "30d", count: "completed_30d_count", minutes: "completed_30d_minutes" },
-  { key: "all", label: "All time", count: "completed_count", minutes: "completed_minutes" },
-];
-
-function timeAgo(iso) {
-  if (!iso) return "";
-  const seconds = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-  if (seconds < 60) return "just now";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  if (seconds < 7 * 86400) return `${Math.floor(seconds / 86400)}d ago`;
-  return localDate(iso);
-}
-
-function diagDayLabel(iso) {
-  const day = new Date(iso);
-  const today = new Date();
-  const yesterday = new Date(today.getTime() - 86400000);
-  const same = (a, b) => a.toDateString() === b.toDateString();
-  if (same(day, today)) return "Today";
-  if (same(day, yesterday)) return "Yesterday";
-  return day.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
-}
-
-function diagHeroHtml(t) {
-  const deltaMinutes = (t.completed_7d_minutes || 0) - (t.completed_prev7d_minutes || 0);
-  const deltaDir = deltaMinutes > 0 ? "up" : deltaMinutes < 0 ? "down" : "flat";
-  const delta = deltaMinutes === 0
-    ? `<span class="diag-delta is-flat">— level with last week</span>`
-    : `<span class="diag-delta is-${deltaDir}"><i class="ph ${deltaDir === "up" ? "ph-arrow-up-right" : "ph-arrow-down-right"}"></i>${formatMinutes(Math.abs(deltaMinutes))} vs prior week</span>`;
-  const total = Math.max(1, t.active_minutes || 0);
-  const segments = DIAG_STATUS.map((s) => {
-    const minutes = t[`${s.key}_minutes`] || 0;
-    const count = t[s.key] || 0;
-    if (!minutes && !count) return "";
-    const width = Math.max(1.5, (minutes / total) * 100);
-    const tip = `${s.label}\n${count} ${count === 1 ? "dope" : "dopes"}\n${formatMinutes(minutes)}`;
-    return `<span class="diag-seg" style="width:${width}%;background:${s.color}" data-progress-tip="${escapeHtml(tip)}" aria-label="${escapeHtml(tip)}"></span>`;
-  }).join("");
-  const legend = DIAG_STATUS.map((s) => `
-    <span class="diag-legend-item">
-      <span class="diag-key" style="background:${s.color}"></span>
-      <span class="diag-legend-label">${s.label}</span>
-      <strong>${t[s.key] || 0}</strong>
-      <small>${formatMinutes(t[`${s.key}_minutes`] || 0)}</small>
-    </span>
-  `).join("");
-  return `
-    <section class="diag-card diag-hero-card">
-      <div class="diag-hero-row">
-        <div class="diag-hero-main">
-          <span class="diag-card-label">Remaining</span>
-          <span class="diag-hero-value">${escapeHtml(formatMinutes(t.active_minutes || 0))}</span>
-          <span class="diag-hero-sub">across ${t.active} active ${t.active === 1 ? "dope" : "dopes"}</span>
-        </div>
-        <div class="diag-hero-aside">
-          <div class="diag-mini-stat">
-            <span class="diag-card-label">Doped this week</span>
-            <strong>${escapeHtml(formatMinutes(t.completed_7d_minutes || 0))}</strong>
-            ${delta}
-          </div>
-          <div class="diag-mini-stat">
-            <span class="diag-card-label">Doped all time</span>
-            <strong>${escapeHtml(formatMinutes(t.completed_minutes || 0))}</strong>
-            <span class="diag-delta is-flat">${t.completed} ${t.completed === 1 ? "dope" : "dopes"} shipped</span>
-          </div>
-        </div>
-      </div>
-      ${t.active ? `
-        <div class="diag-split-track" role="img" aria-label="Remaining work split by status">${segments}</div>
-        <div class="diag-legend">${legend}</div>
-      ` : `<p class="empty mini">Nothing in the queue — every dope is doped.</p>`}
-    </section>
-  `;
-}
-
-function diagCategoriesHtml(buckets, totalMinutes) {
-  if (!buckets.length) return "";
-  const max = Math.max(1, ...buckets.map((b) => b.minutes));
-  const rows = buckets.map((b) => {
-    const color = b.category ? b.category.color : "#8b8b8b";
-    const name = b.category ? b.category.name : "Uncategorized";
-    const share = totalMinutes ? Math.round((b.minutes / totalMinutes) * 100) : 0;
-    const width = Math.max(1.5, (b.minutes / max) * 100);
-    const tip = `${name}\n${b.count} ${b.count === 1 ? "dope" : "dopes"}\n${formatMinutes(b.minutes)} · ${share}%`;
-    return `
-      <div class="diag-bar-row">
-        <span class="diag-bar-label" title="${escapeHtml(name)}"><span class="diag-key" style="background:${escapeHtml(color)}"></span>${escapeHtml(name)}</span>
-        <span class="diag-bar-track"><span class="diag-bar" style="width:${width}%;background:${escapeHtml(color)}" data-progress-tip="${escapeHtml(tip)}"></span></span>
-        <span class="diag-bar-value">${b.count} · ${formatMinutes(b.minutes)}</span>
-      </div>
-    `;
-  }).join("");
-  return `
-    <section class="diag-card">
-      <div class="diag-card-head">
-        <span class="diag-card-label">Remaining by category</span>
-        <small>${formatMinutes(totalMinutes)} open</small>
-      </div>
-      <div class="diag-bars">${rows}</div>
-    </section>
-  `;
-}
-
-function diagPeopleHtml(people) {
-  const win = DIAG_WINDOWS.find((w) => w.key === state.diagWindow) || DIAG_WINDOWS[0];
-  const scored = people.map((p) => ({ p, minutes: p[win.minutes] || 0, count: p[win.count] || 0 }))
-    .sort((a, b) => (b.minutes - a.minutes) || (b.count - a.count) || a.p.user.display_name.localeCompare(b.p.user.display_name));
-  const max = Math.max(1, ...scored.map((s) => s.minutes));
-  const toggle = DIAG_WINDOWS.map((w) => `<button type="button" data-diag-window="${w.key}" class="${w.key === state.diagWindow ? "active" : ""}">${w.label}</button>`).join("");
-  const rows = scored.map(({ p, minutes, count }) => {
-    const width = minutes ? Math.max(1.5, (minutes / max) * 100) : 0;
-    const tip = `${p.user.display_name}\n${count} ${count === 1 ? "dope" : "dopes"} doped\n${formatMinutes(minutes)}${p.in_progress_count ? `\ncarrying ${formatMinutes(p.in_progress_minutes)} now` : ""}`;
-    return `
-      <div class="diag-bar-row">
-        <span class="diag-bar-label" title="${escapeHtml(p.user.display_name)}">
-          <span class="online-dot ${p.online ? "is-online" : ""}" title="${p.online ? "Online now" : "Offline"}"></span>${escapeHtml(p.user.display_name)}
-        </span>
-        <span class="diag-bar-track">${minutes ? `<span class="diag-bar" style="width:${width}%;background:${escapeHtml(normalizeUserColor(p.user.color))}" data-progress-tip="${escapeHtml(tip)}"></span>` : ""}</span>
-        <span class="diag-bar-value">${count ? `${count} · ${formatMinutes(minutes)}` : "—"}</span>
-      </div>
-    `;
-  }).join("");
-  const carrying = people.filter((p) => p.in_progress_count)
-    .map((p) => `<button type="button" class="diag-chip" data-progress-tip="${escapeHtml(`${p.user.display_name}\n${p.in_progress_count} in progress\n${formatMinutes(p.in_progress_minutes)}`)}">
-        <span class="diag-key" style="background:${escapeHtml(normalizeUserColor(p.user.color))}"></span>${escapeHtml(p.user.display_name)}<small>${formatMinutes(p.in_progress_minutes)}</small>
-      </button>`).join("");
-  const footer = people.map((p) => `
-    <div class="diag-person-meta">
-      <span>${escapeHtml(p.user.display_name)}</span>
-      <small>${p.created_count} created · ${p.comments_count} ${p.comments_count === 1 ? "comment" : "comments"}${p.online ? " · online" : p.last_seen_at ? ` · seen ${timeAgo(p.last_seen_at)}` : ""}</small>
-    </div>
-  `).join("");
-  return `
-    <section class="diag-card">
-      <div class="diag-card-head">
-        <span class="diag-card-label">Doped per person</span>
-        <div class="progress-range diag-range" role="group" aria-label="Time window">${toggle}</div>
-      </div>
-      <div class="diag-bars">${rows || `<p class="empty mini">No members yet.</p>`}</div>
-      ${carrying ? `<div class="diag-carrying"><span class="diag-card-label">On it right now</span><div class="diag-chips">${carrying}</div></div>` : ""}
-      <details class="diag-details">
-        <summary>Member details</summary>
-        <div class="diag-person-metas">${footer}</div>
-      </details>
-    </section>
-  `;
-}
-
-function normalizeUserColor(color) {
-  return /^#[0-9a-fA-F]{6}$/.test(color || "") ? color : DEFAULT_COLOR;
-}
-
-function diagActivityHtml(activity) {
-  if (!activity.length) return `<section class="diag-card"><span class="diag-card-label">What happened</span><p class="empty mini">Nothing yet. Create a dope to get the feed going.</p></section>`;
-  const groups = [];
-  activity.forEach((e) => {
-    const label = diagDayLabel(e.at);
-    const group = groups[groups.length - 1];
-    if (group && group.label === label) group.items.push(e);
-    else groups.push({ label, items: [e] });
-  });
-  const body = groups.map((group) => `
-    <div class="diag-day">
-      <span class="diag-day-label">${escapeHtml(group.label)}</span>
-      <ul class="diag-feed">
-        ${group.items.map((e) => {
-          const meta = ACTIVITY_META[e.type] || { icon: "ph-dot", verb: e.type };
-          const detail = e.detail ? `<small class="diag-feed-detail">${e.type === "commented" ? `“${escapeHtml(e.detail)}”` : escapeHtml(e.detail)}</small>` : "";
-          return `<li>
-            <button type="button" class="diag-feed-row" data-diag-dope="${e.dope_id}">
-              <i class="ph ${meta.icon} diag-feed-icon is-${e.type}"></i>
-              <span class="diag-feed-body">
-                <span><strong>${escapeHtml(e.user?.display_name || "someone")}</strong> ${meta.verb} <strong>${escapeHtml(e.dope_title)}</strong></span>
-                ${detail}
-              </span>
-              <time class="diag-feed-time">${escapeHtml(timeAgo(e.at))}</time>
-            </button>
-          </li>`;
-        }).join("")}
-      </ul>
-    </div>
-  `).join("");
-  return `
-    <section class="diag-card">
-      <div class="diag-card-head">
-        <span class="diag-card-label">What happened</span>
-        <small>last ${activity.length} events</small>
-      </div>
-      <div class="diag-timeline">${body}</div>
-    </section>
-  `;
-}
-
-function renderDiagnostics() {
-  const d = state.diag;
-  if (!d || state.route !== "diagnostics") return;
-  $("diag-updated").textContent = `updated ${timeAgo(d.generated_at)}`;
-  $("diagnostics-body").innerHTML = `
-    ${diagHeroHtml(d.totals)}
-    <div class="diag-grid">
-      ${diagPeopleHtml(d.per_person)}
-      ${diagCategoriesHtml(d.remaining_by_category, d.totals.active_minutes || 0)}
-    </div>
-    ${diagActivityHtml(d.activity)}
-  `;
-  document.querySelectorAll("[data-diag-window]").forEach((button) => {
-    button.onclick = (event) => {
-      event.preventDefault();
-      state.diagWindow = button.dataset.diagWindow;
-      renderDiagnostics();
-    };
-  });
-  document.querySelectorAll("[data-diag-dope]").forEach((el) => {
-    el.onclick = (event) => {
-      event.preventDefault();
-      openDope(Number(el.dataset.diagDope));
-    };
-  });
-}
-
-async function loadDiagnostics() {
-  const cached = cacheRead("diagnostics");
-  if (cached && !state.diag) {
-    state.diag = cached;
-    renderDiagnostics();
-  }
-  try {
-    state.diag = await api("/api/diagnostics?limit=80");
-    cacheWrite("diagnostics", state.diag);
-    renderDiagnostics();
-  } catch (err) {
-    if (!state.diag) $("diagnostics-body").innerHTML = `<p class="empty">${escapeHtml(err.message || "Could not load diagnostics")}</p>`;
-    else toast("Showing cached diagnostics");
-  }
-  clearInterval(state.diagTimer);
-  state.diagTimer = setInterval(async () => {
-    if (state.route !== "diagnostics" || document.hidden) return;
-    try {
-      state.diag = await api("/api/diagnostics?limit=80");
-      cacheWrite("diagnostics", state.diag);
-      renderDiagnostics();
-    } catch {}
-  }, 30000);
-}
-
-$("auth-toggle").onclick = () => { state.authMode = state.authMode === "login" ? "signup" : "login"; updateAuthMode(); };
-$("auth-form").onsubmit = async (event) => {
+$("composer").addEventListener("submit", (event) => {
   event.preventDefault();
-  const path = state.authMode === "signup" ? "/api/auth/signup" : "/api/auth/login";
-  try {
-    await api(path, {
-      method: "POST",
-      body: JSON.stringify({ username: $("auth-username").value, password: $("auth-password").value, display_name: $("auth-display").value }),
-    });
-    if (state.authMode === "signup") {
-      state.authMode = "login";
-      $("auth-notice").textContent = "Account created. Sign in to continue.";
-      $("auth-notice").hidden = false;
-      updateAuthMode();
-      $("auth-display").value = "";
-      $("auth-password").focus();
-      return;
-    }
-    state.user = await api("/api/me");
-    cacheWrite("me", state.user);
-    showApp();
-    loadCategories(true).then(render).catch(() => {});
-    try {
-      await loadRoute();
-      startAutoRefresh();
-    } catch (err) {
-      toast(err.message || "Could not load dopes");
-    }
-  } catch (err) { toast(err.message); }
-};
-$("logout").onclick = async () => {
-  await api("/api/auth/logout", { method: "POST" });
-  stopAutoRefresh();
-  clearInterval(state.diagTimer);
-  state.diagTimer = null;
-  clearInterval(state.settingsTimer);
-  state.settingsTimer = null;
-  state.nextResetAt = null;
-  state.user = null;
-  showAuth();
-};
-$("profile-open").onclick = openProfile;
-$("settings-open").onclick = openSettings;
-$("new-dope").onclick = openNewDope;
-$("search").oninput = render;
-$("search").onkeydown = (event) => {
-  if (event.key === "Enter") event.preventDefault();
-};
-document.addEventListener("keydown", (event) => {
-  if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
-  const dialog = document.querySelector("dialog[open]");
-  if (!dialog) return;
-  const primary = dialog.querySelector(".modal-action-bar .primary-wide:not([disabled])");
-  if (!primary) return;
-  event.preventDefault();
-  primary.click();
+  const value = $("description").value.trim();
+  if (!value) return;
+  write("/api/dopes", "POST", { description: value }, () => {
+    if ($("description").value.trim() === value) $("description").value = "";
+    drafts.delete(board.id); filter = "active"; $("search").value = ""; $("description").focus();
+  });
 });
-$("filter-open").onclick = async () => {
-  await loadCategories();
-  renderFilterCategories();
-  $("filter-min").value = state.filters.min;
-  $("filter-max").value = state.filters.max;
-  $("filter-created-from").value = state.filters.createdFrom;
-  $("filter-created-to").value = state.filters.createdTo;
-  $("filter-deps-doped").checked = state.filters.depsDoped;
-  $("filter-completed-by").value = state.filters.completedBy;
-  $("filter-from").value = state.filters.from;
-  $("filter-to").value = state.filters.to;
-  $("filter-dialog").showModal();
-};
-$("filter-apply").onclick = (event) => {
-  event.preventDefault();
-  state.filters = {
-    categoryIds: selectedFilterCategoryIds(),
-    min: $("filter-min").value,
-    max: $("filter-max").value,
-    createdFrom: $("filter-created-from").value,
-    createdTo: $("filter-created-to").value,
-    depsDoped: $("filter-deps-doped").checked,
-    completedBy: $("filter-completed-by").value,
-    from: $("filter-from").value,
-    to: $("filter-to").value,
-  };
-  $("filter-dialog").close();
-  draftWrite("filters", state.filters);
-  render();
-};
-$("filter-reset").onclick = (event) => {
-  event.preventDefault();
-  state.filters = { ...DEFAULT_FILTERS, categoryIds: [] };
-  draftRemove("filters");
-  $("filter-dialog").close();
-  renderFilterCategories();
-  render();
-};
-$("categories-open").onclick = openCategories;
-$("diagnostics-open").onclick = () => {
-  if (state.route === "diagnostics") loadDiagnostics();
-  else location.hash = "diagnostics";
-};
-$("diag-refresh").onclick = (event) => { event.preventDefault(); loadDiagnostics(); };
-document.querySelectorAll("[data-progress-days]").forEach((button) => {
-  button.onclick = async () => {
-    state.progressDays = Number(button.dataset.progressDays);
-    if (state.route !== "active") return;
-    try {
-      state.progress = await api(`/api/stats/progress?days=${state.progressDays}`);
-      renderProgressChart();
-    } catch (err) { toast(err.message); }
-  };
-});
-document.addEventListener("pointerover", showProgressTooltip);
-document.addEventListener("pointermove", moveProgressTooltip);
-document.addEventListener("pointerout", (event) => {
-  if (!event.relatedTarget || !event.relatedTarget.closest?.("[data-progress-tip]")) hideProgressTooltip();
-});
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refreshVisibleData({ force: true });
-});
-window.addEventListener("focus", () => refreshVisibleData({ force: true }));
-window.addEventListener("online", () => refreshVisibleData({ force: true }));
-window.addEventListener("hashchange", async () => {
-  try {
-    await loadRoute();
-  } catch (err) {
-    toast(err.message || "Could not load dopes");
+$("description").addEventListener("input", updateComposer);
+$("description").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault(); $("composer").requestSubmit();
   }
 });
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/static/sw.js").catch(() => {});
+$("shortcut").textContent = (/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl") + " ↵";
+$("board-select").addEventListener("change", (event) => selectBoard(boards.find((b) => b.id === event.target.value)));
+$("search").addEventListener("input", renderList);
+$("retry").addEventListener("click", () => { notice(); loadContext(); });
+$("dismiss").addEventListener("click", () => notice());
+$("logout").addEventListener("click", async () => {
+  try { await api("/api/auth/logout", { method: "POST" }); location.replace("/"); }
+  catch (error) { notice(error.message); }
+});
+$("detail").addEventListener("click", (event) => { if (event.target === $("detail")) $("detail").close(); });
+document.addEventListener("click", (event) => {
+  if (!$("account-menu").contains(event.target)) $("account-menu").open = false;
+});
+function syncVisible() {
+  if (document.visibilityState === "visible" && account && !busy && !$("detail").open) loadContext();
 }
-init();
+window.addEventListener("pageshow", (event) => { if (event.persisted) location.reload(); });
+document.addEventListener("visibilitychange", syncVisible);
+setInterval(syncVisible, 45000);
+const signinStatus = new URLSearchParams(location.search).get("signin");
+const signinMessage = {
+  cancelled: "Sign-in was cancelled.", expired: "This sign-in expired. Try again.",
+  failed: "Silicon Accounts could not finish signing you in. Try again."
+}[signinStatus];
+if (signinStatus) history.replaceState(null, "", "/");
+loadContext().then(() => { if (account && signinMessage) notice(signinMessage); });

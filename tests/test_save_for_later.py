@@ -1,28 +1,8 @@
 from __future__ import annotations
 
-import importlib
-
 from fastapi.testclient import TestClient
 
-
-def load_main(tmp_path, monkeypatch):
-    monkeypatch.setenv("DOPE_DB_PATH", str(tmp_path / "dope.db"))
-    import app.main as main
-
-    return importlib.reload(main)
-
-
-def signup_and_login(client):
-    signup = client.post(
-        "/api/auth/signup",
-        json={"username": "shubham", "password": "password", "display_name": "Shubham"},
-    )
-    assert signup.status_code == 200
-    login = client.post(
-        "/api/auth/login",
-        json={"username": "shubham", "password": "password"},
-    )
-    assert login.status_code == 200
+from silicon import load_main, login
 
 
 def create_dope(client, title, time_text):
@@ -46,7 +26,7 @@ def test_save_for_later_has_its_own_queue_and_is_excluded_from_analytics(
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        signup_and_login(client)
+        login(client)
         saved = create_dope(client, "Set this aside", "2hr")
         active = create_dope(client, "Keep this active", "30min")
         assert client.post(f"/api/dopes/{saved['id']}/assign").status_code == 200
@@ -56,8 +36,8 @@ def test_save_for_later_has_its_own_queue_and_is_excluded_from_analytics(
         payload = response.json()
         assert payload["status"] == "saved"
         assert payload["saved_at"] is not None
-        assert payload["saved_by"]["username"] == "shubham"
-        assert payload["assigned_to"]["username"] == "shubham"
+        assert payload["saved_by"]["username"] == "c:shubham"
+        assert payload["assigned_to"]["username"] == "c:shubham"
 
         active_ids = {item["id"] for item in client.get("/api/dopes?status=active").json()}
         saved_items = client.get("/api/dopes?status=saved").json()
@@ -72,7 +52,7 @@ def test_save_for_later_has_its_own_queue_and_is_excluded_from_analytics(
         assert diagnostics["totals"]["active"] == 1
         assert diagnostics["totals"]["active_minutes"] == 30
         person = next(
-            item for item in diagnostics["per_person"] if item["user"]["username"] == "shubham"
+            item for item in diagnostics["per_person"] if item["user"]["username"] == "c:shubham"
         )
         assert person["created_count"] == 1
         assert person["in_progress_count"] == 0
@@ -104,7 +84,7 @@ def test_save_for_later_requires_an_unsaved_active_dope(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        signup_and_login(client)
+        login(client)
         dope = create_dope(client, "Only save once", "1hr")
 
         assert client.post(f"/api/dopes/{dope['id']}/move-to-active").status_code == 404

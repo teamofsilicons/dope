@@ -1,42 +1,20 @@
 from __future__ import annotations
 
-import importlib
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-
-def load_main(tmp_path, monkeypatch):
-    monkeypatch.setenv("DOPE_DB_PATH", str(tmp_path / "dope.db"))
-    import app.main as main
-
-    return importlib.reload(main)
+from silicon import load_main, login, org_db
 
 
-def signup(client, username, display_name):
-    response = client.post(
-        "/api/auth/signup",
-        json={"username": username, "password": "password", "display_name": display_name},
-    )
-    assert response.status_code == 200
-
-
-def login(client, username):
-    response = client.post(
-        "/api/auth/login",
-        json={"username": username, "password": "password"},
-    )
-    assert response.status_code == 200
-
-
-def test_only_saket_can_view_and_change_reset_settings(tmp_path, monkeypatch):
+def test_only_a_board_manager_can_view_and_change_reset_settings(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
     fixed_now = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(main, "utc_now", lambda: fixed_now)
 
     with TestClient(main.app) as client:
-        signup(client, "shubham", "Shubham")
-        signup(client, "saket", "Saket")
+        login(client, "shubham", "Shubham")
+        login(client, "saket", "Saket")
         login(client, "shubham")
         assert client.get("/api/settings/dope-day").status_code == 403
         assert client.put("/api/settings/dope-day", json={"reset_time": "18:00"}).status_code == 403
@@ -64,10 +42,9 @@ def test_reset_change_rebuckets_only_previous_10_minutes(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "utc_now", lambda: fixed_now)
 
     with TestClient(main.app) as client:
-        signup(client, "saket", "Saket")
-        login(client, "saket")
-        with main.db() as conn:
-            user_id = conn.execute("SELECT id FROM users WHERE username = 'saket'").fetchone()[0]
+        login(client, "saket", "Saket")
+        with org_db() as conn:
+            user_id = conn.execute("SELECT id FROM users WHERE account_handle = 'c:saket'").fetchone()[0]
             old_completion = fixed_now - timedelta(minutes=11)
             recent_completion = fixed_now - timedelta(minutes=5)
             conn.executemany(
@@ -83,7 +60,7 @@ def test_reset_change_rebuckets_only_previous_10_minutes(tmp_path, monkeypatch):
             )
 
         assert client.put("/api/settings/dope-day", json={"reset_time": "18:00"}).status_code == 200
-        with main.db() as conn:
+        with org_db() as conn:
             reset_changes = main.load_reset_changes(conn)
         assert main.reset_minutes_for_completion(old_completion, reset_changes) == 9 * 60
         assert main.reset_minutes_for_completion(recent_completion, reset_changes) == 18 * 60
