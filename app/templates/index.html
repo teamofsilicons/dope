@@ -7,13 +7,14 @@
   <title>Dopes</title>
   <link rel="icon" type="image/png" href="/static/si-logo-light.png?v=20260626-cats2">
   <link rel="apple-touch-icon" href="/static/si-logo-light.png?v=20260626-cats2">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2/src/regular/style.css">
-  <link rel="stylesheet" href="/static/app.css?v=20260728-save-for-later">
-  <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
-  <script src="/static/app.js?v=20260728-save-for-later" defer></script>
+  <link rel="stylesheet" href="/static/vendor/fonts.css">
+  <link rel="stylesheet" href="/static/vendor/icons.css">
+  <link rel="stylesheet" href="/static/app.css?v=boards2">
+  <link rel="stylesheet" href="/static/boards.css?v=boards2">
+  <script src="/static/vendor/fuse.min.js" defer></script>
+  <script src="/static/app.js?v=boards2" defer></script>
+  <script src="/static/boards.js?v=boards2" defer></script>
+  <script src="/static/sharing.js?v=boards2" defer></script>
 </head>
 <body>
   <div id="toast" class="toast" hidden></div>
@@ -34,15 +35,9 @@
     <section class="auth-panel">
       <p class="kicker">Team of Silicons</p>
       <h1>Dopes</h1>
-      <p class="muted">Track product amendments, self-assign work, and close it with commits.</p>
-      <p id="auth-notice" class="auth-notice" hidden></p>
-      <form id="auth-form" class="stack">
-        <input id="auth-username" autocomplete="username" placeholder="Username" required>
-        <input id="auth-password" type="password" autocomplete="current-password" placeholder="Password" required>
-        <input id="auth-display" autocomplete="name" placeholder="Display name" hidden>
-        <button id="auth-submit" type="submit">Sign in</button>
-      </form>
-      <button id="auth-toggle" class="link-button" type="button">Create an account</button>
+      <p class="muted">Create, take, and finish dopes with your team.</p>
+      <p id="auth-notice" class="auth-notice" role="status" hidden></p>
+      <a class="signin" href="/api/auth/login">Sign in with Silicon Accounts</a>
     </section>
   </main>
 
@@ -60,14 +55,27 @@
         <a href="#archived" data-route="archived">Archived</a>
       </nav>
       <div class="user-chip">
-        <button id="diagnostics-open" title="Diagnostics"><i class="ph ph-pulse"></i></button>
-        <button id="categories-open" title="Manage categories"><i class="ph ph-tag"></i></button>
-        <button id="settings-open" title="Settings" aria-label="Settings" hidden><i class="ph ph-gear"></i></button>
+        <button id="diagnostics-open" title="Diagnostics"><i aria-hidden="true" class="ph ph-pulse"></i></button>
+        <button id="categories-open" title="Manage categories"><i aria-hidden="true" class="ph ph-tag"></i></button>
+        <button id="settings-open" title="Settings" aria-label="Settings" hidden><i aria-hidden="true" class="ph ph-gear"></i></button>
         <button id="profile-open" class="profile-chip" title="Profile"><span id="user-color-dot"></span><span id="user-name"></span></button>
-        <button id="logout" title="Sign out"><i class="ph ph-sign-out"></i></button>
+        <button id="logout" title="Sign out"><i aria-hidden="true" class="ph ph-sign-out"></i></button>
       </div>
     </header>
 
+    <div class="workspace">
+      <aside class="boards-side" aria-label="Boards">
+        <div class="side-top"><h2>Boards</h2><button type="button" class="secondary" id="board-create" title="Create board" aria-label="Create board"><i aria-hidden="true" class="ph ph-plus"></i></button></div>
+        <nav id="boards-list" aria-label="Your boards"></nav>
+        <select id="mobile-board" aria-label="Board"></select>
+        <div class="side-tools">
+          <button id="board-invite" type="button"><i aria-hidden="true" class="ph ph-user-plus"></i>Invite</button>
+          <button id="board-inbox" type="button"><i aria-hidden="true" class="ph ph-envelope"></i>Invitations <span id="inbox-count"></span></button>
+          <button id="board-contacts" type="button"><i aria-hidden="true" class="ph ph-address-book"></i>Contacts</button>
+          <button id="board-files" type="button"><i aria-hidden="true" class="ph ph-files"></i>Files</button>
+        </div>
+      </aside>
+      <div class="board-main">
     <section id="board-shell" class="page-shell">
       <section id="progress-panel" class="progress-panel" hidden>
         <div class="progress-top">
@@ -86,12 +94,12 @@
           <h1 id="page-title">Dopes</h1>
           <p id="page-subtitle" class="muted">Product work waiting to be amended.</p>
         </div>
-        <button id="new-dope"><i class="ph ph-plus"></i>New Dope</button>
+        <button id="new-dope"><i aria-hidden="true" class="ph ph-plus"></i>New Dope</button>
       </div>
 
       <section class="toolbar">
-        <label class="search-box"><i class="ph ph-magnifying-glass"></i><input id="search" name="dope_query" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Search"></label>
-        <button id="filter-open" class="secondary"><i class="ph ph-sliders-horizontal"></i>Filter</button>
+        <label class="search-box"><i aria-hidden="true" class="ph ph-magnifying-glass"></i><input id="search" name="dope_query" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Search"></label>
+        <button id="filter-open" class="secondary"><i aria-hidden="true" class="ph ph-sliders-horizontal"></i>Filter</button>
       </section>
 
       <section id="active-assigned-wrap">
@@ -114,16 +122,24 @@
         </div>
         <div class="diag-title-side">
           <span id="diag-updated" class="diag-updated"></span>
-          <button id="diag-refresh" class="secondary" type="button"><i class="ph ph-arrows-clockwise"></i>Refresh</button>
+          <button id="diag-refresh" class="secondary" type="button"><i aria-hidden="true" class="ph ph-arrows-clockwise"></i>Refresh</button>
         </div>
       </div>
       <div id="diagnostics-body"><p class="empty">Loading diagnostics…</p></div>
     </section>
+      </div>
+    </div>
   </main>
+
+  <dialog id="workspace-dialog" aria-labelledby="workspace-title">
+    <div class="modal small"><button type="button" id="workspace-close" class="icon-close" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button>
+      <h2 id="workspace-title"></h2><div id="workspace-body"></div>
+    </div>
+  </dialog>
 
   <dialog id="dope-dialog">
     <form method="dialog" class="modal">
-      <button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button>
+      <button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button>
       <h2 id="modal-title">New Dope</h2>
       <div id="modal-body"></div>
     </form>
@@ -131,7 +147,7 @@
 
   <dialog id="filter-dialog">
     <form method="dialog" class="modal small">
-      <button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button>
+      <button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button>
       <h2>Filters</h2>
       <div class="filter-group">
         <span class="filter-label">Category</span>
@@ -171,7 +187,7 @@
 
   <dialog id="categories-dialog">
     <form method="dialog" class="modal small categories-modal">
-      <button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button>
+      <button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button>
       <h2>Categories</h2>
       <p class="muted categories-intro">Group your dopes by category. Each category carries a color used across cards and filters.</p>
       <div id="category-list" class="category-manage-list"></div>
@@ -193,15 +209,15 @@
           <button type="button" data-category-color="#ffbb00" style="--swatch:#ffbb00"></button>
           <button type="button" data-category-color="#1a1a1a" style="--swatch:#1a1a1a"></button>
         </div>
-        <button id="category-add" class="primary-wide" type="button" value="default"><i class="ph ph-plus"></i>Add category</button>
+        <button id="category-add" class="primary-wide" type="button" value="default"><i aria-hidden="true" class="ph ph-plus"></i>Add category</button>
       </div>
     </form>
   </dialog>
 
   <dialog id="settings-dialog">
     <form method="dialog" class="modal small settings-modal">
-      <button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button>
-      <p class="kicker">Saket only</p>
+      <button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button>
+      <p class="kicker">Board administration</p>
       <h2>Settings</h2>
       <section class="reset-countdown-card">
         <span>Next dope-day reset in</span>
@@ -213,15 +229,16 @@
       </label>
       <p class="settings-note">A change applies going forward and re-buckets only dopes completed during the previous 10 minutes. Older progress history keeps the reset rule it already had.</p>
       <div class="modal-actions">
-        <button id="settings-save" value="default"><i class="ph ph-floppy-disk"></i>Save settings</button>
+        <button id="settings-save" value="default"><i aria-hidden="true" class="ph ph-floppy-disk"></i>Save settings</button>
       </div>
     </form>
   </dialog>
 
   <dialog id="profile-dialog">
     <form method="dialog" class="modal small profile-modal">
-      <button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button>
+      <button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button>
       <h2>Profile</h2>
+      <p><span id="account-handle"></span> · <a href="/api/auth/login">Switch account</a></p>
       <label>Display name<input id="profile-display-name" autocomplete="name" placeholder="Display name"></label>
       <label>Graph color
         <div class="color-field">
@@ -250,11 +267,11 @@
         <div id="api-key-created" class="api-key-created" hidden>
           <span>Copy this key now. It will not be shown again.</span>
           <code id="api-key-value"></code>
-          <button id="api-key-copy" class="secondary" type="button"><i class="ph ph-copy"></i>Copy key</button>
+          <button id="api-key-copy" class="secondary" type="button"><i aria-hidden="true" class="ph ph-copy"></i>Copy key</button>
         </div>
         <div class="api-key-create">
           <input id="api-key-name" autocomplete="off" placeholder="Key name">
-          <button id="api-key-create" class="secondary" type="button"><i class="ph ph-key"></i>Generate</button>
+          <button id="api-key-create" class="secondary" type="button"><i aria-hidden="true" class="ph ph-key"></i>Generate</button>
         </div>
         <div id="api-key-list" class="api-key-list"></div>
       </section>

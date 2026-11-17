@@ -7,7 +7,7 @@ const state = {
   progress: [],
   progressDays: 7,
   filters: { categoryIds: [], min: "", max: "", createdFrom: "", createdTo: "", depsDoped: false, completedBy: "", from: "", to: "" },
-  authMode: "login",
+  account: null, board: null, boards: [], generation: 0, pending: new Map(),
   booted: false,
   users: [],
   usersFetchedAt: 0,
@@ -35,12 +35,13 @@ const CATEGORY_REFRESH_INTERVAL_MS = 120000;
 const BACKGROUND_REFRESH_MIN_MS = 5000;
 const DOPE_DAY_RESET_UTC_HOUR = 3;
 const DOPE_DAY_RESET_UTC_MINUTE = 30;
-const REVIEWER_USERNAMES = new Set(["saket", "brainspoof"]);
-const DELEGATED_COMPLETION_USERNAME = "saket";
+function storageKey(prefix, key) {
+  return JSON.stringify([prefix, state.account?.uuid, state.board?.id, key]);
+}
 
 function storageRead(prefix, key, fallback = null) {
   try {
-    const raw = localStorage.getItem(`${prefix}${key}`);
+    const raw = (prefix === DRAFT_PREFIX ? localStorage : sessionStorage).getItem(storageKey(prefix, key));
     return raw ? JSON.parse(raw) : fallback;
   } catch {
     return fallback;
@@ -48,11 +49,11 @@ function storageRead(prefix, key, fallback = null) {
 }
 
 function storageWrite(prefix, key, value) {
-  try { localStorage.setItem(`${prefix}${key}`, JSON.stringify(value)); } catch {}
+  try { (prefix === DRAFT_PREFIX ? localStorage : sessionStorage).setItem(storageKey(prefix, key), JSON.stringify(value)); } catch {}
 }
 
 function storageRemove(prefix, key) {
-  try { localStorage.removeItem(`${prefix}${key}`); } catch {}
+  try { (prefix === DRAFT_PREFIX ? localStorage : sessionStorage).removeItem(storageKey(prefix, key)); } catch {}
 }
 
 function cacheRead(key, fallback = null) {
@@ -107,16 +108,23 @@ function fullDate(iso) {
 }
 
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-  });
+  const generation = state.generation;
+  const headers = { Accept: "application/json", ...options.headers };
+  if (options.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  if (state.board) headers["X-Dope-Board"] = state.board.id;
+  if (state.account) headers["X-Dope-Account"] = state.account.uuid;
+  const res = await fetch(path, { ...options, headers, credentials: "same-origin", cache: "no-store" });
+  const result = await res.json().catch(() => ({}));
+  if (generation !== state.generation) throw new DOMException("Board changed", "AbortError");
   if (!res.ok) {
-    let message = "Something went wrong";
-    try { message = (await res.json()).detail || message; } catch {}
-    throw new Error(message);
+    const detail = result.detail;
+    const message = typeof detail === "string" ? detail : detail?.[0]?.msg || "The request could not be completed.";
+    const error = Object.assign(new Error(message), {status: res.status});
+    if ((res.status === 401 || (res.status === 409 && message.includes("account changed"))) && state.account) endSession(message);
+    else if (res.status === 403 && message.includes("access to this board") && state.board) recoverBoard();
+    throw error;
   }
-  return res.json();
+  return result;
 }
 
 function toast(message, undo) {
@@ -147,9 +155,9 @@ function celebrateDope() {
   const marks = ["Doped", "Ship it", "Done", "Amended"];
   shell.innerHTML = `
     <div class="celebration-card">
-      <i class="ph ph-confetti"></i>
+      <i aria-hidden="true" class="ph ph-confetti"></i>
       <strong>Doped</strong>
-      <span>Commit links locked in.</span>
+      <span>Dope completed.</span>
     </div>
     ${Array.from({ length: 24 }, (_, i) => {
       const x = 8 + Math.random() * 84;
@@ -194,65 +202,11 @@ function setRouteLoading(loading) {
   if (el) el.hidden = !loading;
 }
 
-function updateAuthMode() {
-  const signup = state.authMode === "signup";
-  $("auth-display").hidden = !signup;
-  $("auth-display").required = signup;
-  $("auth-submit").textContent = signup ? "Create account" : "Sign in";
-  $("auth-toggle").textContent = signup ? "Already have an account" : "Create an account";
-}
+function isReviewer() { return !!state.board?.can_manage; }
+function canCompleteForOthers() { return !!state.board?.can_manage; }
+function canManageSettings() { return !!state.board?.can_manage; }
 
-function isReviewer() {
-  return state.user && REVIEWER_USERNAMES.has(String(state.user.username || "").trim().toLowerCase());
-}
-
-function canCompleteForOthers() {
-  return state.user && String(state.user.username || "").trim().toLowerCase() === DELEGATED_COMPLETION_USERNAME;
-}
-
-function canManageSettings() {
-  return state.user && String(state.user.username || "").trim().toLowerCase() === "saket";
-}
-
-async function init() {
-  updateAuthMode();
-  state.filters = { ...state.filters, ...draftRead("filters", {}) };
-  state.categories = cacheRead("categories", []) || [];
-  try {
-    state.user = await api("/api/me");
-    cacheWrite("me", state.user);
-  } catch {
-    const cachedUser = cacheRead("me");
-    if (cachedUser) {
-      state.user = cachedUser;
-      showApp(true);
-      await loadRoute();
-      state.booted = true;
-      hideInitialLoading();
-      setRouteLoading(false);
-      startAutoRefresh();
-      toast("Offline cache");
-      return;
-    }
-    state.booted = true;
-    showAuth();
-    return;
-  }
-  showApp(true);
-  loadCategories(true).then(render).catch(() => {});
-  try {
-    await loadRoute();
-  } catch (err) {
-    toast(err.message || "Could not load dopes");
-  } finally {
-    state.booted = true;
-    hideInitialLoading();
-    setRouteLoading(false);
-    startAutoRefresh();
-  }
-}
-
-async function loadRoute() {
+async function loadRoute(seed = null) {
   const routeVersion = ++state.routeVersion;
   if (state.booted) setRouteLoading(true);
   try {
@@ -275,7 +229,7 @@ async function loadRoute() {
     document.querySelectorAll(".nav-links a").forEach((a) => a.classList.toggle("active", a.dataset.route === state.route));
     $("page-title").textContent = isActive ? "Active Dopes" : isSaved ? "Saved for Later" : isReview ? "Review Dopes" : state.route === "completed" ? "Completed Dopes" : "Archived Dopes";
     $("page-title").classList.toggle("compact-title", isActive || isSaved);
-    $("page-subtitle").textContent = state.route === "active" ? "Product work waiting to be amended." : isSaved ? "Work set aside and excluded from analytics." : isReview ? "Work waiting for Saket or Brainspoof to review." : state.route === "completed" ? "Work closed with commit links." : "Dopes moved out of the main queue.";
+    $("page-subtitle").textContent = state.route === "active" ? "Product work waiting to be amended." : isSaved ? "Work set aside and excluded from analytics." : isReview ? "Work waiting for a board administrator to review." : state.route === "completed" ? "Work completed by the team." : "Dopes moved out of the main queue.";
     $("page-subtitle").hidden = isActive;
     $("progress-panel").hidden = !isActive;
     $("new-dope").style.display = isActive ? "inline-flex" : "none";
@@ -284,13 +238,14 @@ async function loadRoute() {
     const progressDays = state.progressDays;
     const cachedDopes = cacheRead(`dopes:${state.route}`);
     const cachedProgress = cacheRead(`progress:${progressDays}`);
-    if (cachedDopes) state.dopes = cachedDopes;
+    state.dopes = cachedDopes || [];
     if (isActive && cachedProgress) state.progress = cachedProgress;
-    if (cachedDopes && routeVersion === state.routeVersion) render();
+    if (routeVersion === state.routeVersion) render();
     try {
       let nextDopes;
       let nextProgress = state.progress;
-      if (isActive) {
+      if (seed) { nextDopes = seed.dopes; nextProgress = seed.progress; }
+      else if (isActive) {
         [nextDopes, nextProgress] = await Promise.all([
           api(`/api/dopes?status=${state.route}`),
           api(`/api/stats/progress?days=${progressDays}`),
@@ -306,12 +261,13 @@ async function loadRoute() {
       state.allDopes = [];
       state.lastBoardRefreshAt = Date.now();
     } catch (err) {
-      if (!cachedDopes) throw err;
+      if (routeVersion !== state.routeVersion || err.name === "AbortError") return;
+      if (!cachedDopes || err.status) throw err;
       toast("Showing offline cache");
     }
     if (routeVersion === state.routeVersion) render();
   } finally {
-    setRouteLoading(false);
+    if (routeVersion === state.routeVersion) setRouteLoading(false);
   }
 }
 
@@ -351,6 +307,7 @@ function startAutoRefresh() {
   stopAutoRefresh();
   state.boardTimer = setInterval(() => {
     refreshCurrentRoute().catch(() => {});
+    if (!document.hidden) refreshInboxCount();
   }, BOARD_REFRESH_INTERVAL_MS);
   scheduleDopeDayRefresh();
 }
@@ -414,7 +371,7 @@ async function ensureAllDopes(force = false) {
     state.allDopes = await api("/api/dopes?status=all");
     cacheWrite("dopes:all", state.allDopes);
   } catch (err) {
-    if (!cached) throw err;
+    if (err.name === "AbortError" || err.status || !cached) throw err;
     state.allDopes = cached;
     toast("Showing offline cache");
   }
@@ -432,7 +389,8 @@ async function loadCategories(force = false) {
     state.categories = await api("/api/categories");
     cacheWrite("categories", state.categories);
     state.categoriesFetchedAt = Date.now();
-  } catch {
+  } catch (err) {
+    if (err.name === "AbortError" || err.status) throw err;
     if (cached) state.categories = cached;
   }
   return state.categories;
@@ -444,13 +402,13 @@ function categoryById(id) {
 }
 
 function searchableText(d) {
-  const div = document.createElement("div");
-  div.innerHTML = d.description_html || "";
-  return `${d.title} ${div.textContent || ""} ${d.assigned_to?.display_name || ""} ${d.completed_by?.display_name || ""}`;
+  const template = document.createElement("template");
+  template.innerHTML = d.description_html || "";
+  return `${d.title} ${template.content.textContent || ""} ${d.assigned_to?.display_name || ""} ${d.completed_by?.display_name || ""}`;
 }
 
 function filteredDopes() {
-  let items = [...state.dopes];
+  let items = visibleDopes(state.dopes, state.route);
   const query = $("search").value.trim();
   if (query) {
     const fuse = new Fuse(items.map((d) => ({ ...d, searchText: searchableText(d) })), {
@@ -476,7 +434,8 @@ function filteredDopes() {
   if (state.filters.depsDoped) items = items.filter((d) => (d.blocked_dependencies || []).length === 0);
   if (state.route === "completed") {
     const by = state.filters.completedBy.trim().toLowerCase();
-    if (by) items = items.filter((d) => (d.completed_by?.display_name || "").toLowerCase().includes(by));
+    if (state.filters.completedById) items = items.filter(d => d.completed_by?.id === state.filters.completedById);
+    else if (by) items = items.filter((d) => (d.completed_by?.display_name || "").toLowerCase().includes(by));
     if (state.filters.from) items = items.filter((d) => d.completed_at?.slice(0, 10) >= state.filters.from);
     if (state.filters.to) items = items.filter((d) => d.completed_at?.slice(0, 10) <= state.filters.to);
   }
@@ -501,7 +460,7 @@ function renderFilterButton() {
   const button = $("filter-open");
   button.classList.toggle("secondary", !active);
   button.classList.toggle("filters-active", active);
-  button.innerHTML = `<i class="ph ph-sliders-horizontal"></i>${active ? "Filters Applied" : "Filter"}`;
+  button.innerHTML = `<i aria-hidden="true" class="ph ph-sliders-horizontal"></i>${active ? "Filters Applied" : "Filter"}`;
 }
 
 function render() {
@@ -585,7 +544,7 @@ function commentBadge(d) {
   const mentioned = (d.unread_mentions || 0) > 0;
   if (!count) return "";
   return `<span class="pill comment-pill ${unread ? "has-unread" : ""}">
-    <i class="ph ph-chat-circle"></i>${count}
+    <i aria-hidden="true" class="ph ph-chat-circle"></i>${count}
     ${mentioned ? `<span class="comment-new is-mention">@ you</span>` : unread ? `<span class="comment-new">${unread} new</span>` : ""}
   </span>`;
 }
@@ -604,21 +563,21 @@ function card(d) {
   const blocked = d.status === "active" && (d.blocked_dependencies || []).length > 0;
   const cat = d.category;
   const accent = cat ? ` style="--accent:${escapeHtml(cat.color)}"` : "";
-  return `<button class="dope-card ${blocked ? "is-blocked" : ""} ${d.status === "review" ? "is-review" : ""} ${review.parent_id || hasReviewChanges ? "is-review-change" : ""} ${cat ? "has-accent" : ""}" data-dope="${d.id}"${accent}>
+  return `<button class="dope-card ${blocked ? "is-blocked" : ""} ${d.status === "review" ? "is-review" : ""} ${review.parent_id || hasReviewChanges ? "is-review-change" : ""} ${cat ? "has-accent" : ""}" data-dope="${d.id}" ${state.pending.has(d.id) ? 'disabled aria-busy="true"' : ""}${accent}>
     <span class="card-main">
       <h3>${escapeHtml(d.title)}</h3>
       <span class="card-tags">
         ${cat ? categoryPill(cat) : ""}
-        ${d.status === "saved" ? `<span class="pill saved-pill"><i class="ph ph-bookmark-simple"></i>Saved</span>` : ""}
-        ${d.status === "review" ? `<span class="pill review-pill"><i class="ph ph-git-branch"></i>Review</span>` : ""}
-        ${review.parent_id || hasReviewChanges ? `<span class="pill review-pill"><i class="ph ph-arrow-bend-up-right"></i>Review changes</span>` : ""}
+        ${d.status === "saved" ? `<span class="pill saved-pill"><i aria-hidden="true" class="ph ph-bookmark-simple"></i>Saved</span>` : ""}
+        ${d.status === "review" ? `<span class="pill review-pill"><i aria-hidden="true" class="ph ph-git-branch"></i>Review</span>` : ""}
+        ${review.parent_id || hasReviewChanges ? `<span class="pill review-pill"><i aria-hidden="true" class="ph ph-arrow-bend-up-right"></i>Review changes</span>` : ""}
         ${status ? `<span class="meta"><span>${status}</span></span>` : ""}
       </span>
     </span>
     <span class="card-pills">
       ${commentBadge(d)}
-      ${d.dependent_count ? `<span class="pill"><i class="ph ph-tree-structure"></i>${d.dependent_count} ${d.dependent_count === 1 ? "dependent" : "dependents"}</span>` : ""}
-      <span class="pill"><i class="ph ph-clock"></i>${formatMinutes(d.time_minutes)}</span>
+      ${d.dependent_count ? `<span class="pill"><i aria-hidden="true" class="ph ph-tree-structure"></i>${d.dependent_count} ${d.dependent_count === 1 ? "dependent" : "dependents"}</span>` : ""}
+      ${d.time_minutes ? `<span class="pill"><i aria-hidden="true" class="ph ph-clock"></i>${formatMinutes(d.time_minutes)}</span>` : ""}
     </span>
   </button>`;
 }
@@ -655,7 +614,12 @@ function bindInlineCategory(d) {
       const raw = button.dataset.inlineCategory;
       const categoryId = raw ? Number(raw) : null;
       const current = d.category ? d.category.id : null;
-      if (current === categoryId) return;
+      if (current === categoryId || picker.getAttribute("aria-busy") === "true") return;
+      const previous = d.category;
+      d.category = categoryById(categoryId);
+      picker.setAttribute("aria-busy", "true");
+      picker.querySelectorAll("[data-inline-category]").forEach(b => b.classList.toggle("is-selected", b === button));
+      render();
       try {
         const updated = await api(`/api/dopes/${d.id}/category`, {
           method: "PATCH",
@@ -668,7 +632,12 @@ function bindInlineCategory(d) {
         picker.querySelectorAll("[data-inline-category]").forEach((b) => b.classList.toggle("is-selected", b === button));
         render();
         toast(updated.category ? `Category set to ${updated.category.name}` : "Category cleared");
-      } catch (err) { toast(err.message); }
+      } catch (err) {
+        if (!picker.isConnected || err.name === "AbortError") return;
+        d.category = previous;
+        picker.querySelectorAll("[data-inline-category]").forEach(b => b.classList.toggle("is-selected", b.dataset.inlineCategory === String(current ?? "")));
+        render(); toast(err.message);
+      } finally { picker.removeAttribute("aria-busy"); }
     };
   });
 }
@@ -678,17 +647,30 @@ function escapeHtml(value) {
 }
 
 function sanitizeHtml(html) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  doc.querySelectorAll("script,style,iframe,object,embed,link,meta").forEach((n) => n.remove());
-  doc.body.querySelectorAll("*").forEach((node) => {
-    [...node.attributes].forEach((attr) => {
-      const name = attr.name.toLowerCase();
-      const value = attr.value;
-      if (name.startsWith("on")) node.removeAttribute(attr.name);
-      if ((name === "href" || name === "src") && !/^(https?:|data:image\/)/i.test(value)) node.removeAttribute(attr.name);
-    });
-  });
-  return doc.body.innerHTML;
+  const source = document.createElement("template");
+  source.innerHTML = html || "";
+  const allowed = new Set("p div br strong b em i u s del sup sub pre code blockquote ul ol li h1 h2 h3 h4 hr span a img".split(" "));
+  function clean(node) {
+    if (node.nodeType === Node.TEXT_NODE) return document.createTextNode(node.textContent);
+    const fragment = document.createDocumentFragment();
+    if (node.nodeType !== Node.ELEMENT_NODE || node.namespaceURI !== "http://www.w3.org/1999/xhtml") return fragment;
+    const tag = node.localName;
+    if (["script", "style", "iframe", "object", "template"].includes(tag)) return fragment;
+    const result = allowed.has(tag) ? document.createElement(tag) : fragment;
+    if (tag === "a" && /^https?:\/\//i.test(node.getAttribute("href") || "")) {
+      result.href = node.getAttribute("href"); result.rel = "noreferrer"; result.target = "_blank";
+    }
+    if (tag === "img") {
+      const src = node.getAttribute("src") || "";
+      if (!/^(https?:\/\/|data:image\/(png|jpeg|webp|gif);base64,)/i.test(src)) return fragment;
+      result.src = src; result.alt = node.alt; result.referrerPolicy = "no-referrer";
+    }
+    for (const child of node.childNodes) result.append(clean(child));
+    return result;
+  }
+  const out = document.createElement("div");
+  for (const child of source.content.childNodes) out.append(clean(child));
+  return out.innerHTML;
 }
 
 function linkifyText(value) {
@@ -758,9 +740,9 @@ function dependencyPickerHtml(selectedIds = [], excludeId = null) {
   `).join("") : `<p class="empty mini">No dopes available yet.</p>`;
   return `
     <section class="dependency-picker">
-      <button id="dependency-toggle" class="secondary" type="button"><i class="ph ph-link-simple"></i>Add dependencies</button>
+      <button id="dependency-toggle" class="secondary" type="button"><i aria-hidden="true" class="ph ph-link-simple"></i>Add dependencies</button>
       <div id="dependency-panel" class="dependency-panel" hidden>
-        <label class="dependency-search"><i class="ph ph-magnifying-glass"></i><input id="dependency-search" name="dope_dependency_query" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Search dopes"></label>
+        <label class="dependency-search"><i aria-hidden="true" class="ph ph-magnifying-glass"></i><input id="dependency-search" name="dope_dependency_query" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Search dopes"></label>
         <div class="dependency-list">${options}</div>
       </div>
     </section>
@@ -824,22 +806,22 @@ function preventSearchSubmit(root = document) {
 }
 
 async function openNewDope() {
-  await Promise.all([ensureAllDopes(true), loadCategories()]);
   const draftKey = "new-dope";
   const draft = draftRead(draftKey);
   $("modal-title").hidden = true;
   $("modal-title").textContent = "New Dope";
   $("modal-body").innerHTML = `
-    <div class="modal-topbar is-visible"><strong>New Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
+    <div class="modal-topbar is-visible"><strong>New Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button></div>
     <div class="modal-content">
-      <label>Title<input id="new-title" name="dope_new_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" placeholder="Improve onboarding empty state" value="${escapeHtml(draft.title || "")}"></label>
-      <label>Description<div id="new-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(draft.description_html || "")}</div></label>
-      <label>Time to complete<input id="new-time" name="dope_new_time" autocomplete="off" placeholder="2hr, 30min, 0.5hr" value="${escapeHtml(draft.time_text || "")}"></label>
+      <label>Title (optional)<input id="new-title" name="dope_new_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" placeholder="Improve onboarding empty state" value="${escapeHtml(draft.title || "")}"></label>
+      <label>Description<div id="new-description" class="editor" role="textbox" aria-label="Dope description" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(draft.description_html || "")}</div></label>
+      <label>Time to complete (optional)<input id="new-time" name="dope_new_time" autocomplete="off" placeholder="2hr, 30min, 0.5hr" value="${escapeHtml(draft.time_text || "")}"></label>
       ${categoryPickerHtml(draft.category_id ?? null)}
       ${dependencyPickerHtml(draft.dependency_ids || [])}
     </div>
     <div class="modal-action-bar"><button id="create-dope" class="primary-wide" value="default">Create Dope</button></div>
   `;
+  hydrateDependencies(draft.dependency_ids || []);
   wireEditor($("new-description"));
   bindCategoryPicker();
   bindDependencyPicker(Boolean((draft.dependency_ids || []).length));
@@ -854,20 +836,7 @@ async function openNewDope() {
   $("create-dope").onclick = async (event) => {
     event.preventDefault();
     try {
-      await api("/api/dopes", {
-        method: "POST",
-        body: JSON.stringify({
-          title: $("new-title").value,
-          description_html: sanitizeHtml($("new-description").innerHTML),
-          time_text: $("new-time").value,
-          category_id: selectedCategoryId(),
-          dependency_ids: selectedDependencyIds(),
-        }),
-      });
-      draftRemove(draftKey);
-      $("dope-dialog").close();
-      await loadRoute();
-      toast("Dope created");
+      await changeDope(null, "create", editorData("new"), {draftKey, message: "Dope created"});
     } catch (err) { toast(err.message); }
   };
   $("dope-dialog").showModal();
@@ -884,16 +853,6 @@ function wireEditor(editor) {
   });
 }
 
-async function loadUsers(force = false) {
-  const fresh = state.usersFetchedAt && Date.now() - state.usersFetchedAt < 30000;
-  if (!force && fresh && state.users.length) return state.users;
-  try {
-    state.users = await api("/api/users");
-    state.usersFetchedAt = Date.now();
-  } catch {}
-  return state.users;
-}
-
 function updateDopeInState(updated) {
   state.dopes = state.dopes.map((it) => (it.id === updated.id ? { ...it, ...updated } : it));
   state.allDopes = state.allDopes.map((it) => (it.id === updated.id ? { ...it, ...updated } : it));
@@ -908,28 +867,37 @@ function commentsSectionHtml() {
       <div class="comment-composer">
         <div class="composer-box">
           <div id="mention-menu" class="mention-menu" hidden></div>
-          <textarea id="comment-input" rows="2" placeholder="Write a comment. Type @ to mention a teammate."></textarea>
+          <textarea aria-label="Comment" id="comment-input" rows="2" placeholder="Write a comment. Type @ to mention a teammate."></textarea>
         </div>
-        <button id="comment-send" type="button" title="Send"><i class="ph ph-paper-plane-right"></i></button>
+        <button id="comment-send" type="button" title="Send"><i aria-hidden="true" class="ph ph-paper-plane-right"></i></button>
       </div>
     </section>
   `;
 }
 
 function commentBodyHtml(c) {
-  let html = linkifyText(c.body);
-  const tokens = [];
-  (c.mentions || []).forEach((m) => {
-    const isMe = state.user && m.id === state.user.id;
-    [m.username, m.display_name].forEach((name) => {
-      if (name) tokens.push({ name, isMe });
-    });
-  });
-  tokens.sort((a, b) => b.name.length - a.name.length).forEach(({ name, isMe }) => {
-    const pattern = escapeHtml(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    html = html.replace(new RegExp(`@${pattern}`, "gi"), (match) => `<span class="mention ${isMe ? "mention-me" : ""}">${match}</span>`);
-  });
-  return html;
+  const root = document.createElement("template");
+  root.innerHTML = linkifyText(c.body);
+  const mentions = new Map();
+  for (const m of c.mentions || []) for (const name of [m.username, m.display_name]) {
+    if (name) mentions.set("@" + name.toLowerCase(), m.id === state.user?.id);
+  }
+  if (!mentions.size) return root.innerHTML;
+  const names = [...mentions.keys()].sort((a, b) => b.length - a.length);
+  const pattern = new RegExp(names.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "gi");
+  for (const node of [...root.content.childNodes]) {
+    if (node.nodeType !== Node.TEXT_NODE) continue;
+    const value = node.textContent, parts = document.createDocumentFragment();
+    let start = 0;
+    for (const m of value.matchAll(pattern)) {
+      parts.append(value.slice(start, m.index));
+      const tag = document.createElement("span");
+      tag.className = mentions.get(m[0].toLowerCase()) ? "mention mention-me" : "mention";
+      tag.textContent = m[0]; parts.append(tag); start = m.index + m[0].length;
+    }
+    parts.append(value.slice(start)); node.replaceWith(parts);
+  }
+  return root.innerHTML;
 }
 
 function commentHtml(c) {
@@ -941,7 +909,7 @@ function commentHtml(c) {
       <div class="comment-meta">
         <strong>${escapeHtml(c.user?.display_name || "someone")}</strong>
         <span>${fullDate(c.created_at)}</span>
-        ${mine ? `<button type="button" class="comment-delete" data-comment-delete="${c.id}" title="Delete comment"><i class="ph ph-trash"></i></button>` : ""}
+        ${mine && !c.pending ? `<button type="button" class="comment-delete" data-comment-delete="${c.id}" title="Delete comment"><i aria-hidden="true" class="ph ph-trash"></i></button>` : ""}
       </div>
       <div class="comment-text">${commentBodyHtml(c)}</div>
     </div>
@@ -956,9 +924,11 @@ function bindComments(d) {
   const draftKey = `comment:${d.id}`;
   input.value = draftRead(draftKey, {}).body || "";
   let comments = [];
+  let pendingComment = null;
+  let revision = 0;
 
   const renderList = () => {
-    if (!$("comment-list")) return;
+    if ($("comment-list") !== list) return;
     $("comment-list").innerHTML = comments.length
       ? comments.map(commentHtml).join("")
       : `<p class="empty mini">No comments yet. Start the conversation.</p>`;
@@ -978,7 +948,10 @@ function bindComments(d) {
   };
 
   const refresh = async (markRead) => {
-    comments = await api(`/api/dopes/${d.id}/comments`);
+    const at = revision;
+    const fresh = await api(`/api/dopes/${d.id}/comments`);
+    if (at !== revision || pendingComment || $("comment-list") !== list) return;
+    comments = fresh;
     renderList();
     if (markRead) {
       await api(`/api/dopes/${d.id}/comments/read`, { method: "POST" }).catch(() => {});
@@ -988,9 +961,8 @@ function bindComments(d) {
   };
 
   refresh(true).catch(() => {
-    if ($("comment-list")) $("comment-list").innerHTML = `<p class="empty mini">Could not load comments.</p>`;
+    if ($("comment-list") === list) list.innerHTML = `<p class="empty mini">Could not load comments.</p>`;
   });
-  loadUsers();
 
   const timer = setInterval(() => {
     if (!document.body.contains(list) || !$("dope-dialog").open) { clearInterval(timer); return; }
@@ -1002,19 +974,28 @@ function bindComments(d) {
 
   const post = async () => {
     const body = input.value.trim();
-    if (!body) return;
+    if (!body || send.disabled) return;
     send.disabled = true;
+    revision++;
+    pendingComment = {id: -1, pending: true, user: state.user, body, created_at: new Date().toISOString()};
+    comments.push(pendingComment);
+    input.value = "";
+    renderList();
     try {
-      const created = await api(`/api/dopes/${d.id}/comments`, { method: "POST", body: JSON.stringify({ body }) });
-      comments = [...comments, created];
-      input.value = "";
-      draftRemove(draftKey);
+      const created = await api(`/api/dopes/${d.id}/comments`, {method: "POST", headers: retryHeaders(draftKey, {body}), body: JSON.stringify({body})});
+      draftRemove("operation:" + draftKey);
+      comments = comments.map(c => c === pendingComment ? created : c);
+      if (!input.value) draftRemove(draftKey);
       renderList();
       updateDopeInState({ id: d.id, comment_count: comments.length, unread_comments: 0 });
       render();
       list.scrollTop = list.scrollHeight;
-    } catch (err) { toast(err.message); }
-    finally { send.disabled = false; }
+    } catch (err) {
+      comments = comments.filter(c => c !== pendingComment);
+      if (!input.value) input.value = body;
+      if (err.name !== "AbortError") toast(err.message);
+      renderList();
+    } finally { pendingComment = null; revision++; send.disabled = false; }
   };
   send.onclick = (event) => { event.preventDefault(); post(); };
   input.addEventListener("keydown", (event) => {
@@ -1045,9 +1026,9 @@ function setupMentionAutocomplete(textarea) {
   const renderMenu = () => {
     menu.innerHTML = items.map((u, i) => `
       <button type="button" class="mention-item ${i === activeIndex ? "is-active" : ""}" data-mention-index="${i}">
-        <span class="online-dot ${u.online ? "is-online" : ""}"></span>
+        ${avatarHtml(u)}
         <strong>${escapeHtml(u.display_name)}</strong>
-        <small>@${escapeHtml(u.username)}${u.online ? " · online" : ""}</small>
+        <small>@${escapeHtml(u.id)}${u.online ? " · online" : ""}</small>
       </button>
     `).join("");
     menu.hidden = !items.length;
@@ -1062,27 +1043,30 @@ function setupMentionAutocomplete(textarea) {
     const user = items[index];
     if (!user || !context) return;
     const pos = textarea.selectionStart;
-    const insert = `@${user.username} `;
+    const insert = `@${user.id} `;
     textarea.value = textarea.value.slice(0, context.at) + insert + textarea.value.slice(pos);
     const caret = context.at + insert.length;
     textarea.setSelectionRange(caret, caret);
     textarea.focus();
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
     closeMenu();
+    let preview = $("mention-selected");
+    if (!preview) { preview = document.createElement("div"); preview.id = "mention-selected"; textarea.after(preview); }
+    preview.innerHTML = personHtml(user);
+    const updatePreview = () => { if (!textarea.value.includes(insert.trim())) { preview.remove(); textarea.removeEventListener("input", updatePreview); } };
+    textarea.addEventListener("input", updatePreview);
   };
 
   const openMenu = async () => {
     context = mentionContext();
     if (!context) { closeMenu(); return; }
-    const users = await loadUsers();
+    const query = context.token;
+    let users;
+    try { users = await peopleSearch(query, {membersOnly: true}); } catch { closeMenu(); return; }
     const stillOpen = mentionContext();
-    if (!stillOpen || stillOpen.at !== context.at) return;
+    if (!stillOpen || stillOpen.token !== query || !textarea.isConnected) return;
     context = stillOpen;
-    const q = context.token.toLowerCase();
-    items = users
-      .filter((u) => !q || u.username.toLowerCase().includes(q) || u.display_name.toLowerCase().includes(q))
-      .sort((a, b) => (b.online - a.online) || a.display_name.localeCompare(b.display_name))
-      .slice(0, 8);
+    items = users.slice(0, 8);
     activeIndex = 0;
     renderMenu();
   };
@@ -1106,7 +1090,7 @@ async function openDope(id) {
     d = state.allDopes.find((item) => item.id === id);
   }
   if (!d) return;
-  if (!state.categories.length) await loadCategories();
+  if (!state.categories.length) loadCategories().catch(() => {});
   $("modal-title").hidden = true;
   $("modal-title").textContent = d.title;
   const versions = d.versions || [];
@@ -1136,8 +1120,8 @@ async function openDope(id) {
         </div>
         ${review.branch_url ? `<div class="review-row"><span>Branch</span><a href="${escapeHtml(review.branch_url)}" target="_blank" rel="noreferrer">${escapeHtml(review.branch_url)}</a></div>` : ""}
         ${review.note ? `<div class="review-note">${linkifyText(review.note)}</div>` : ""}
-        ${review.approved_at ? `<div class="review-outcome is-approved"><i class="ph ph-check-circle"></i>Approved by ${escapeHtml(review.approved_by?.display_name || "someone")} on ${localDate(review.approved_at)}</div>` : ""}
-        ${review.rejected_at ? `<div class="review-outcome is-rejected"><i class="ph ph-x-circle"></i>Rejected by ${escapeHtml(review.rejected_by?.display_name || "someone")} on ${localDate(review.rejected_at)}</div>` : ""}
+        ${review.approved_at ? `<div class="review-outcome is-approved"><i aria-hidden="true" class="ph ph-check-circle"></i>Approved by ${escapeHtml(review.approved_by?.display_name || "someone")} on ${localDate(review.approved_at)}</div>` : ""}
+        ${review.rejected_at ? `<div class="review-outcome is-rejected"><i aria-hidden="true" class="ph ph-x-circle"></i>Rejected by ${escapeHtml(review.rejected_by?.display_name || "someone")} on ${localDate(review.rejected_at)}</div>` : ""}
         ${review.rejection_note ? `<div class="review-note is-rejection">${linkifyText(review.rejection_note)}</div>` : ""}
         ${review.followup_id ? `<button type="button" class="dependency-link is-undoped" data-review-open="${review.followup_id}" value="default"><span>Open review changes</span><small>#${review.followup_id}</small></button>` : ""}
       </div>
@@ -1165,7 +1149,7 @@ async function openDope(id) {
       <h2>Dependencies</h2>
       <button id="dependency-summary" class="dependency-summary" value="default">
         <span>${dependencyLabel}</span>
-        <i class="ph ph-caret-down"></i>
+        <i aria-hidden="true" class="ph ph-caret-down"></i>
       </button>
       <div id="dependency-links" class="dependency-links" hidden>
         ${sortedDependencies.map((dep) => `<button class="dependency-link ${dep.status !== "completed" ? "is-undoped" : ""}" data-dependency-open="${dep.id}" value="default">
@@ -1185,7 +1169,7 @@ async function openDope(id) {
       <h2>Dependents</h2>
       <button id="dependent-summary" class="dependency-summary" value="default">
         <span>${dependentCount} ${dependentCount === 1 ? "dependent" : "dependents"}</span>
-        <i class="ph ph-caret-down"></i>
+        <i aria-hidden="true" class="ph ph-caret-down"></i>
       </button>
       <div id="dependent-links" class="dependency-links" hidden>
         ${sortedDependents.map((dep) => `<button class="dependency-link ${dep.depth > 1 ? "is-indirect" : ""}" data-dependent-open="${dep.id}" value="default">
@@ -1196,15 +1180,15 @@ async function openDope(id) {
     </section>
   ` : "";
   $("modal-body").innerHTML = `
-    <div id="modal-topbar" class="modal-topbar"><strong>${escapeHtml(d.title)}</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
+    <div id="modal-topbar" class="modal-topbar"><strong>${escapeHtml(d.title)}</strong><button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button></div>
     <div class="modal-content">
       <div id="modal-title-sentinel"></div>
       <div class="modal-headline">
         <div>
-          <span class="pill"><i class="ph ph-clock"></i>${formatMinutes(d.time_minutes)}</span>
-          ${d.assigned_to ? `<span class="pill"><i class="ph ph-user"></i>${escapeHtml(d.assigned_to.display_name)}</span>` : ""}
-          ${d.completed_by ? `<span class="pill"><i class="ph ph-check-circle"></i>${escapeHtml(d.completed_by.display_name)} on ${localDate(d.completed_at)}</span>` : ""}
-          ${d.status === "saved" ? `<span class="pill saved-pill"><i class="ph ph-bookmark-simple"></i>Saved ${localDate(d.saved_at)}</span>` : ""}
+          ${d.time_minutes ? `<span class="pill"><i aria-hidden="true" class="ph ph-clock"></i>${formatMinutes(d.time_minutes)}</span>` : ""}
+          ${d.assigned_to ? `<span class="pill"><i aria-hidden="true" class="ph ph-user"></i>${escapeHtml(d.assigned_to.display_name)}</span>` : ""}
+          ${d.completed_by ? `<span class="pill"><i aria-hidden="true" class="ph ph-check-circle"></i>${escapeHtml(d.completed_by.display_name)} on ${localDate(d.completed_at)}</span>` : ""}
+          ${d.status === "saved" ? `<span class="pill saved-pill"><i aria-hidden="true" class="ph ph-bookmark-simple"></i>Saved ${localDate(d.saved_at)}</span>` : ""}
         </div>
         <div class="version-control">
           ${editCount ? `<button id="version-toggle" class="version-button" value="default">${editCount} ${editCount === 1 ? "edit" : "edits"}</button>` : `<span class="version-empty">no edits</span>`}
@@ -1222,20 +1206,21 @@ async function openDope(id) {
       ${commentsSectionHtml()}
     </div>
     <div class="modal-action-bar">
-      ${d.status === "active" && blocked ? `<button class="primary-wide" value="default" disabled><i class="ph ph-warning-circle"></i>Dependencies Undoped</button>` : ""}
-      ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="assign" class="primary-wide" value="default"><i class="ph ph-target"></i>I'll take it</button>` : ""}
-      ${d.status === "active" && !blocked && d.assigned_to ? `<button id="complete" class="primary-wide" value="default"><i class="ph ph-confetti"></i>Doped</button>` : ""}
-      ${d.status === "saved" ? `<button id="move-to-active" class="primary-wide" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Move to Active</button>` : ""}
-      ${d.status === "review" && isReviewer() ? `<button id="approve-review" class="primary-wide" value="default"><i class="ph ph-check-circle"></i>Doped</button>` : ""}
+      ${d.status === "active" && blocked ? `<button class="primary-wide" value="default" disabled><i aria-hidden="true" class="ph ph-warning-circle"></i>Dependencies Undoped</button>` : ""}
+      ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="assign" class="primary-wide" value="default"><i aria-hidden="true" class="ph ph-target"></i>I'll take it</button>` : ""}
+      ${d.status === "active" && !blocked && d.assigned_to ? `<button id="complete" class="primary-wide" value="default"><i aria-hidden="true" class="ph ph-confetti"></i>Doped</button>` : ""}
+      ${d.status === "saved" ? `<button id="move-to-active" class="primary-wide" value="default"><i aria-hidden="true" class="ph ph-arrow-counter-clockwise"></i>Move to Active</button>` : ""}
+      ${d.status === "review" && isReviewer() ? `<button id="approve-review" class="primary-wide" value="default"><i aria-hidden="true" class="ph ph-check-circle"></i>Doped</button>` : ""}
       <div class="modal-action-row">
-        ${d.status !== "archived" ? `<button id="edit-dope" class="icon-action secondary" value="default" title="Edit"><i class="ph ph-pencil-simple"></i></button>` : ""}
-        ${d.status !== "archived" ? `<button id="archive" class="icon-action danger" value="default" title="Archive"><i class="ph ph-archive"></i></button>` : `<button id="restore" class="secondary" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Restore</button>`}
-        ${d.status === "active" && d.assigned_to ? `<button id="unassign" class="non-cta" value="default"><i class="ph ph-user-minus"></i>Unassign Dope</button>` : ""}
-        ${d.status === "active" ? `<button id="save-later" class="secondary action-text" value="default"><i class="ph ph-bookmark-simple"></i>Save for later</button>` : ""}
-        ${d.status === "active" && !blocked ? `<button id="send-review" class="secondary action-text" value="default"><i class="ph ph-git-branch"></i>Send for Review</button>` : ""}
-        ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="complete" class="secondary action-text" value="default"><i class="ph ph-confetti"></i>Doped</button>` : ""}
-        ${d.status === "review" && isReviewer() ? `<button id="reject-review" class="danger action-text" value="default"><i class="ph ph-x-circle"></i>Reject</button>` : ""}
-        ${d.status === "completed" ? `<button id="uncomplete" class="secondary action-text" value="default"><i class="ph ph-arrow-counter-clockwise"></i>Mark Not Completed</button>` : ""}
+        ${d.status !== "archived" ? `<button id="edit-dope" class="icon-action secondary" value="default" title="Edit"><i aria-hidden="true" class="ph ph-pencil-simple"></i></button>` : ""}
+        ${d.status !== "archived" ? `<button id="archive" class="icon-action danger" value="default" title="Archive"><i aria-hidden="true" class="ph ph-archive"></i></button>` : `<button id="restore" class="secondary" value="default"><i aria-hidden="true" class="ph ph-arrow-counter-clockwise"></i>Restore</button>`}
+        ${d.status === "active" && (d.assigned_to?.id === state.user.id || (d.assigned_to && canManageSettings())) ? `<button id="unassign" class="non-cta" value="default"><i aria-hidden="true" class="ph ph-user-minus"></i>Unassign Dope</button>` : ""}
+        ${d.status === "active" ? `<button id="save-later" class="secondary action-text" value="default"><i aria-hidden="true" class="ph ph-bookmark-simple"></i>Save for later</button>` : ""}
+        ${d.status === "active" && !blocked ? `<button id="send-review" class="secondary action-text" value="default"><i aria-hidden="true" class="ph ph-git-branch"></i>Send for Review</button>` : ""}
+        ${d.status === "active" && !blocked && !d.assigned_to ? `<button id="complete" class="secondary action-text" value="default"><i aria-hidden="true" class="ph ph-confetti"></i>Doped</button>` : ""}
+        ${d.status === "active" && !blocked ? `<button id="completion-options" class="secondary action-text" type="button">Completion note…</button>` : ""}
+        ${d.status === "review" && isReviewer() ? `<button id="reject-review" class="danger action-text" value="default"><i aria-hidden="true" class="ph ph-x-circle"></i>Reject</button>` : ""}
+        ${d.status === "completed" ? `<button id="uncomplete" class="secondary action-text" value="default"><i aria-hidden="true" class="ph ph-arrow-counter-clockwise"></i>Mark Not Completed</button>` : ""}
       </div>
     </div>
   `;
@@ -1284,65 +1269,23 @@ async function openDope(id) {
 }
 
 function bindDopeActions(d) {
-  const closeReload = async (message) => {
-    $("dope-dialog").close();
-    await loadRoute();
-    toast(message);
-  };
-  const edit = $("edit-dope");
-  if (edit) edit.onclick = (event) => { event.preventDefault(); openEditDope(d); };
-  const assign = $("assign");
-  if (assign) assign.onclick = async (event) => { event.preventDefault(); await api(`/api/dopes/${d.id}/assign`, { method: "POST" }); await closeReload("Dope assigned"); };
-  const unassign = $("unassign");
-  if (unassign) unassign.onclick = (event) => { event.preventDefault(); openUnassignDope(d); };
-  const complete = $("complete");
-  if (complete) complete.onclick = (event) => { event.preventDefault(); openCompleteDope(d); };
-  const saveLater = $("save-later");
-  if (saveLater) saveLater.onclick = async (event) => {
-    event.preventDefault();
-    await api(`/api/dopes/${d.id}/save-for-later`, { method: "POST" });
-    $("dope-dialog").close();
-    await loadRoute();
-    toast("Dope saved for later", async () => {
-      await api(`/api/dopes/${d.id}/move-to-active`, { method: "POST" });
-      await loadRoute();
-      toast("Dope moved back to Active");
-    });
-  };
-  const moveToActive = $("move-to-active");
-  if (moveToActive) moveToActive.onclick = async (event) => {
-    event.preventDefault();
-    await api(`/api/dopes/${d.id}/move-to-active`, { method: "POST" });
-    await closeReload("Dope moved back to Active");
-  };
-  const sendReview = $("send-review");
-  if (sendReview) sendReview.onclick = (event) => { event.preventDefault(); openReviewDope(d); };
-  const approveReview = $("approve-review");
-  if (approveReview) approveReview.onclick = async (event) => {
-    event.preventDefault();
-    await api(`/api/dopes/${d.id}/review/approve`, { method: "POST" });
-    await closeReload("Review approved");
-  };
-  const rejectReview = $("reject-review");
-  if (rejectReview) rejectReview.onclick = (event) => { event.preventDefault(); openRejectReview(d); };
-  const uncomplete = $("uncomplete");
-  if (uncomplete) uncomplete.onclick = async (event) => {
-    event.preventDefault();
-    if (!confirm("Mark this dope as not completed?")) return;
-    await api(`/api/dopes/${d.id}/uncomplete`, { method: "POST" });
-    await closeReload("Dope marked not completed");
-  };
-  const archive = $("archive");
-  if (archive) archive.onclick = async (event) => {
-    event.preventDefault();
-    if (!confirm("Archive this dope?")) return;
-    await api(`/api/dopes/${d.id}/archive`, { method: "POST" });
-    $("dope-dialog").close();
-    await loadRoute();
-    toast("Dope archived", async () => { await api(`/api/dopes/${d.id}/restore`, { method: "POST" }); await loadRoute(); toast("Archive undone"); });
-  };
-  const restore = $("restore");
-  if (restore) restore.onclick = async (event) => { event.preventDefault(); await api(`/api/dopes/${d.id}/restore`, { method: "POST" }); await closeReload("Dope restored"); };
+  function action(id, handler) {
+    const el = $(id);
+    if (el) el.onclick = (event) => { event.preventDefault(); handler(); };
+  }
+  action("edit-dope", () => openEditDope(d));
+  action("completion-options", () => openCompleteDope(d));
+  action("complete", () => changeDope(d, "complete", {}, {message: "Dope completed"}));
+  action("assign", () => changeDope(d, "assign", {}, {message: "Dope assigned"}));
+  action("unassign", () => openUnassignDope(d));
+  action("send-review", () => openReviewDope(d));
+  action("reject-review", () => openRejectReview(d));
+  action("approve-review", () => changeDope(d, "review/approve", {}, {message: "Review approved"}));
+  action("move-to-active", () => changeDope(d, "move-to-active", {}, {message: "Moved to Active"}));
+  action("save-later", () => changeDope(d, "save-for-later", {}, {message: "Dope saved for later", undo: "move-to-active"}));
+  action("uncomplete", () => { if (confirm("Reopen this dope?")) changeDope(d, "uncomplete", {}, {message: "Dope reopened"}); });
+  action("archive", () => { if (confirm("Archive this dope?")) changeDope(d, "archive", {}, {message: "Dope archived", undo: "restore"}); });
+  action("restore", () => changeDope(d, "restore", {}, {message: "Dope restored"}));
 }
 
 function openUnassignDope(d) {
@@ -1351,27 +1294,20 @@ function openUnassignDope(d) {
   $("modal-title").hidden = true;
   $("modal-title").textContent = "Unassign Dope";
   $("modal-body").innerHTML = `
-    <div class="modal-topbar is-visible"><strong>Unassign Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
+    <div class="modal-topbar is-visible"><strong>Unassign Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button></div>
     <div class="modal-content">
       <h2>${escapeHtml(d.title)}</h2>
       <label>Reason<input id="unassign-reason" name="dope_unassign_reason" autocomplete="off" maxlength="500" required placeholder="What blocked this?" value="${escapeHtml(draft.reason || "")}"></label>
     </div>
     <div class="modal-action-bar">
-      <button id="confirm-unassign" class="primary-wide" value="default"><i class="ph ph-user-minus"></i>Unassign Dope</button>
+      <button id="confirm-unassign" class="primary-wide" value="default"><i aria-hidden="true" class="ph ph-user-minus"></i>Unassign Dope</button>
     </div>
   `;
   bindDraftFields(draftKey, [["reason", "unassign-reason"]]);
   $("confirm-unassign").onclick = async (event) => {
     event.preventDefault();
     try {
-      await api(`/api/dopes/${d.id}/unassign`, {
-        method: "POST",
-        body: JSON.stringify({ reason: $("unassign-reason").value }),
-      });
-      draftRemove(draftKey);
-      $("dope-dialog").close();
-      await loadRoute();
-      toast("Dope unassigned");
+      await changeDope(d, "unassign", {reason: $("unassign-reason").value}, {draftKey, message: "Dope unassigned"});
     } catch (err) { toast(err.message); }
   };
   $("unassign-reason").focus();
@@ -1406,7 +1342,6 @@ function bindModalChrome(title) {
 }
 
 async function openEditDope(d) {
-  await Promise.all([ensureAllDopes(true), loadCategories()]);
   const draftKey = `edit-dope:${d.id}`;
   const draft = draftRead(draftKey);
   const selectedDeps = draft.dependency_ids || (d.dependencies || []).map((dep) => dep.id);
@@ -1414,18 +1349,19 @@ async function openEditDope(d) {
   $("modal-title").hidden = true;
   $("modal-title").textContent = "Edit Dope";
   $("modal-body").innerHTML = `
-    <div class="modal-topbar is-visible"><strong>Edit Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
+    <div class="modal-topbar is-visible"><strong>Edit Dope</strong><button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button></div>
     <div class="modal-content">
       <label>Title<input id="edit-title" name="dope_edit_title" autocomplete="off" autocapitalize="sentences" spellcheck="true" value="${escapeHtml(draft.title || d.title)}"></label>
-      <label>Description<div id="edit-description" class="editor" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(draft.description_html || d.description_html)}</div></label>
-      <label>Time to complete<input id="edit-time" name="dope_edit_time" autocomplete="off" placeholder="2hr, 30min, 0.5hr" value="${escapeHtml(draft.time_text || formatMinutes(d.time_minutes))}"></label>
+      <label>Description<div id="edit-description" class="editor" role="textbox" aria-label="Dope description" contenteditable="true" data-placeholder="Write details. Paste images directly here.">${sanitizeHtml(draft.description_html || d.description_html)}</div></label>
+      <label>Time to complete<input id="edit-time" name="dope_edit_time" autocomplete="off" placeholder="2hr, 30min, 0.5hr" value="${escapeHtml(draft.time_text || (d.time_minutes ? formatMinutes(d.time_minutes) : ""))}"></label>
       ${categoryPickerHtml(selectedCategory)}
       ${dependencyPickerHtml(selectedDeps, d.id)}
     </div>
     <div class="modal-action-bar">
-      <button id="save-edit" class="primary-wide" value="default"><i class="ph ph-floppy-disk"></i>Save edit</button>
+      <button id="save-edit" class="primary-wide" value="default"><i aria-hidden="true" class="ph ph-floppy-disk"></i>Save edit</button>
     </div>
   `;
+  hydrateDependencies(selectedDeps, d.id);
   wireEditor($("edit-description"));
   bindCategoryPicker();
   bindDependencyPicker(selectedDeps.length > 0);
@@ -1440,21 +1376,7 @@ async function openEditDope(d) {
   $("save-edit").onclick = async (event) => {
     event.preventDefault();
     try {
-      const updated = await api(`/api/dopes/${d.id}`, {
-        method: "PUT",
-        body: JSON.stringify({
-          title: $("edit-title").value,
-          description_html: sanitizeHtml($("edit-description").innerHTML),
-          time_text: $("edit-time").value,
-          category_id: selectedCategoryId(),
-          dependency_ids: selectedDependencyIds(),
-        }),
-      });
-      state.dopes = state.dopes.map((item) => item.id === updated.id ? updated : item);
-      state.allDopes = state.allDopes.map((item) => item.id === updated.id ? updated : item);
-      draftRemove(draftKey);
-      toast("Edit saved");
-      await openDope(updated.id);
+      await changeDope(d, "edit", editorData("edit"), {draftKey, message: "Edit saved"});
     } catch (err) { toast(err.message); }
   };
 }
@@ -1462,36 +1384,28 @@ async function openEditDope(d) {
 async function openCompleteDope(d) {
   const draftKey = `complete:${d.id}`;
   const draft = draftRead(draftKey);
-  const completionUsers = canCompleteForOthers()
-    ? (await loadUsers()).filter((user) => user.id !== state.user.id)
-    : [];
-  const completionUserOptions = completionUsers.map((user) =>
-    `<option value="${user.id}">${escapeHtml(user.display_name)} (@${escapeHtml(user.username)})</option>`
-  ).join("");
   $("modal-title").hidden = true;
   $("modal-title").textContent = "Doped";
   $("modal-body").innerHTML = `
-    <div class="modal-topbar is-visible"><strong>Doped</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
+    <div class="modal-topbar is-visible"><strong>Doped</strong><button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button></div>
     <div class="modal-content">
       <h2>${escapeHtml(d.title)}</h2>
-      <label>Doped description with commit links<textarea id="completion-text" rows="12" placeholder="Write what changed and include at least one commit link">${escapeHtml(draft.completion_text || "")}</textarea></label>
+      <label>Completion note (optional)<textarea id="completion-text" rows="6" placeholder="What changed?">${escapeHtml(draft.completion_text || "")}</textarea></label>
       ${canCompleteForOthers() ? `
         <label class="filter-check"><input id="complete-for-other" type="checkbox">Doped for someone else</label>
         <label id="complete-for-user-wrap" hidden>Who is it for?
-          <select id="complete-for-user">
-            <option value="">Choose a person</option>
-            ${completionUserOptions}
-          </select>
+          <input id="complete-for-user" autocomplete="off" placeholder="Search members">
         </label>
       ` : ""}
     </div>
     <div class="modal-action-bar">
-      <button id="confirm-complete" class="primary-wide" value="default"><i class="ph ph-confetti"></i>Doped</button>
+      <button id="confirm-complete" class="primary-wide" value="default"><i aria-hidden="true" class="ph ph-confetti"></i>Doped</button>
     </div>
   `;
   bindDraftFields(draftKey, [["completion_text", "completion-text"]]);
   const completeForOther = $("complete-for-other");
   const completeForUserWrap = $("complete-for-user-wrap");
+  const delegate = completeForOther ? attachPicker($("complete-for-user"), { membersOnly: true }) : null;
   if (completeForOther && completeForUserWrap) {
     completeForOther.onchange = () => {
       completeForUserWrap.hidden = !completeForOther.checked;
@@ -1501,23 +1415,12 @@ async function openCompleteDope(d) {
   $("confirm-complete").onclick = async (event) => {
     event.preventDefault();
     try {
-      const completedForUserId = completeForOther?.checked ? Number($("complete-for-user").value) : null;
+      const completedForUserId = completeForOther?.checked ? delegate.person?.local_id : null;
       if (completeForOther?.checked && !completedForUserId) {
         toast("Choose who this dope is for");
         return;
       }
-      await api(`/api/dopes/${d.id}/complete`, {
-        method: "POST",
-        body: JSON.stringify({
-          completion_text: $("completion-text").value,
-          completed_for_user_id: completedForUserId,
-        }),
-      });
-      draftRemove(draftKey);
-      $("dope-dialog").close();
-      await loadRoute();
-      celebrateDope();
-      toast("Dope completed");
+      await changeDope(d, "complete", {completion_text: $("completion-text").value, completed_for_user_id: completedForUserId}, {draftKey, message: "Dope completed"});
     } catch (err) { toast(err.message); }
   };
 }
@@ -1528,28 +1431,21 @@ function openReviewDope(d) {
   $("modal-title").hidden = true;
   $("modal-title").textContent = "Send for Review";
   $("modal-body").innerHTML = `
-    <div class="modal-topbar is-visible"><strong>Send for Review</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
+    <div class="modal-topbar is-visible"><strong>Send for Review</strong><button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button></div>
     <div class="modal-content">
       <h2>${escapeHtml(d.title)}</h2>
       <label>Reviewer note<textarea id="review-note" rows="8" placeholder="What should the reviewer check?">${escapeHtml(draft.note || "")}</textarea></label>
       <label>Review branch link<input id="review-branch" name="dope_review_branch" autocomplete="off" placeholder="https://github.com/team/repo/tree/review-branch" value="${escapeHtml(draft.branch_url || "")}"></label>
     </div>
     <div class="modal-action-bar">
-      <button id="confirm-review" class="primary-wide" value="default"><i class="ph ph-git-branch"></i>Send for Review</button>
+      <button id="confirm-review" class="primary-wide" value="default"><i aria-hidden="true" class="ph ph-git-branch"></i>Send for Review</button>
     </div>
   `;
   bindDraftFields(draftKey, [["note", "review-note"], ["branch_url", "review-branch"]]);
   $("confirm-review").onclick = async (event) => {
     event.preventDefault();
     try {
-      await api(`/api/dopes/${d.id}/review`, {
-        method: "POST",
-        body: JSON.stringify({ note: $("review-note").value, branch_url: $("review-branch").value }),
-      });
-      draftRemove(draftKey);
-      $("dope-dialog").close();
-      await loadRoute();
-      toast("Sent for review");
+      await changeDope(d, "review", {note: $("review-note").value, branch_url: $("review-branch").value}, {draftKey, message: "Sent for review"});
     } catch (err) { toast(err.message); }
   };
 }
@@ -1560,29 +1456,21 @@ function openRejectReview(d) {
   $("modal-title").hidden = true;
   $("modal-title").textContent = "Reject Review";
   $("modal-body").innerHTML = `
-    <div class="modal-topbar is-visible"><strong>Reject Review</strong><button class="icon-close" value="cancel" aria-label="Close"><i class="ph ph-x"></i></button></div>
+    <div class="modal-topbar is-visible"><strong>Reject Review</strong><button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button></div>
     <div class="modal-content">
       <h2>${escapeHtml(d.title)}</h2>
       <label>Reviewer notes<textarea id="review-reject-note" rows="8" placeholder="What needs to change?">${escapeHtml(draft.note || "")}</textarea></label>
-      <label>Remaining time<input id="review-reject-time" name="dope_review_reject_time" autocomplete="off" placeholder="30min, 2hr" value="${escapeHtml(draft.time_text || formatMinutes(d.time_minutes))}"></label>
+      <label>Remaining time<input id="review-reject-time" name="dope_review_reject_time" autocomplete="off" placeholder="30min, 2hr" value="${escapeHtml(draft.time_text || (d.time_minutes ? formatMinutes(d.time_minutes) : ""))}"></label>
     </div>
     <div class="modal-action-bar">
-      <button id="confirm-reject-review" class="primary-wide danger" value="default"><i class="ph ph-x-circle"></i>Reject Review</button>
+      <button id="confirm-reject-review" class="primary-wide danger" value="default"><i aria-hidden="true" class="ph ph-x-circle"></i>Reject Review</button>
     </div>
   `;
   bindDraftFields(draftKey, [["note", "review-reject-note"], ["time_text", "review-reject-time"]]);
   $("confirm-reject-review").onclick = async (event) => {
     event.preventDefault();
     try {
-      await api(`/api/dopes/${d.id}/review/reject`, {
-        method: "POST",
-        body: JSON.stringify({ note: $("review-reject-note").value, time_text: $("review-reject-time").value }),
-      });
-      draftRemove(draftKey);
-      $("dope-dialog").close();
-      if (location.hash !== "#active") location.hash = "active";
-      else await loadRoute();
-      toast("Review rejected");
+      await changeDope(d, "review/reject", {note: $("review-reject-note").value, time_text: $("review-reject-time").value}, {draftKey, message: "Review rejected"});
     } catch (err) { toast(err.message); }
   };
 }
@@ -1679,7 +1567,7 @@ function renderApiKeys(keys = []) {
         <strong>${escapeHtml(key.name)}</strong>
         <small>${escapeHtml(key.prefix)}... · created ${localDate(key.created_at)}${key.last_used_at ? ` · used ${localDate(key.last_used_at)}` : ""}${key.revoked_at ? " · revoked" : ""}</small>
       </span>
-      ${key.revoked_at ? "" : `<button class="danger" type="button" data-api-key-revoke="${key.id}"><i class="ph ph-trash"></i>Delete key</button>`}
+      ${key.revoked_at ? "" : `<button class="danger" type="button" data-api-key-revoke="${key.id}"><i aria-hidden="true" class="ph ph-trash"></i>Delete key</button>`}
     </div>
   `).join("") : `<p class="empty mini">No API keys yet.</p>`;
   list.innerHTML = rows;
@@ -1804,8 +1692,8 @@ function categoryManageRow(cat) {
     <div class="category-manage-row" data-category-row="${cat.id}">
       <input class="category-row-color" type="color" value="${escapeHtml(cat.color)}" data-category-color-input="${cat.id}" aria-label="Color for ${escapeHtml(cat.name)}">
       <input class="category-row-name" value="${escapeHtml(cat.name)}" maxlength="60" data-category-name-input="${cat.id}" aria-label="Name for ${escapeHtml(cat.name)}">
-      <button type="button" class="secondary category-row-save" data-category-save="${cat.id}" title="Save"><i class="ph ph-check"></i></button>
-      <button type="button" class="danger category-row-delete" data-category-delete="${cat.id}" title="Delete"><i class="ph ph-trash"></i></button>
+      <button type="button" class="secondary category-row-save" data-category-save="${cat.id}" title="Save"><i aria-hidden="true" class="ph ph-check"></i></button>
+      <button type="button" class="danger category-row-delete" data-category-delete="${cat.id}" title="Delete"><i aria-hidden="true" class="ph ph-trash"></i></button>
     </div>
   `;
 }
@@ -1928,7 +1816,7 @@ function diagHeroHtml(t) {
   const deltaDir = deltaMinutes > 0 ? "up" : deltaMinutes < 0 ? "down" : "flat";
   const delta = deltaMinutes === 0
     ? `<span class="diag-delta is-flat">— level with last week</span>`
-    : `<span class="diag-delta is-${deltaDir}"><i class="ph ${deltaDir === "up" ? "ph-arrow-up-right" : "ph-arrow-down-right"}"></i>${formatMinutes(Math.abs(deltaMinutes))} vs prior week</span>`;
+    : `<span class="diag-delta is-${deltaDir}"><i aria-hidden="true" class="ph ${deltaDir === "up" ? "ph-arrow-up-right" : "ph-arrow-down-right"}"></i>${formatMinutes(Math.abs(deltaMinutes))} vs prior week</span>`;
   const total = Math.max(1, t.active_minutes || 0);
   const segments = DIAG_STATUS.map((s) => {
     const minutes = t[`${s.key}_minutes`] || 0;
@@ -2070,7 +1958,7 @@ function diagActivityHtml(activity) {
           const detail = e.detail ? `<small class="diag-feed-detail">${e.type === "commented" ? `“${escapeHtml(e.detail)}”` : escapeHtml(e.detail)}</small>` : "";
           return `<li>
             <button type="button" class="diag-feed-row" data-diag-dope="${e.dope_id}">
-              <i class="ph ${meta.icon} diag-feed-icon is-${e.type}"></i>
+              <i aria-hidden="true" class="ph ${meta.icon} diag-feed-icon is-${e.type}"></i>
               <span class="diag-feed-body">
                 <span><strong>${escapeHtml(e.user?.display_name || "someone")}</strong> ${meta.verb} <strong>${escapeHtml(e.dope_title)}</strong></span>
                 ${detail}
@@ -2131,6 +2019,7 @@ async function loadDiagnostics() {
     cacheWrite("diagnostics", state.diag);
     renderDiagnostics();
   } catch (err) {
+    if (err.name === "AbortError") return;
     if (!state.diag) $("diagnostics-body").innerHTML = `<p class="empty">${escapeHtml(err.message || "Could not load diagnostics")}</p>`;
     else toast("Showing cached diagnostics");
   }
@@ -2145,46 +2034,9 @@ async function loadDiagnostics() {
   }, 30000);
 }
 
-$("auth-toggle").onclick = () => { state.authMode = state.authMode === "login" ? "signup" : "login"; updateAuthMode(); };
-$("auth-form").onsubmit = async (event) => {
-  event.preventDefault();
-  const path = state.authMode === "signup" ? "/api/auth/signup" : "/api/auth/login";
-  try {
-    await api(path, {
-      method: "POST",
-      body: JSON.stringify({ username: $("auth-username").value, password: $("auth-password").value, display_name: $("auth-display").value }),
-    });
-    if (state.authMode === "signup") {
-      state.authMode = "login";
-      $("auth-notice").textContent = "Account created. Sign in to continue.";
-      $("auth-notice").hidden = false;
-      updateAuthMode();
-      $("auth-display").value = "";
-      $("auth-password").focus();
-      return;
-    }
-    state.user = await api("/api/me");
-    cacheWrite("me", state.user);
-    showApp();
-    loadCategories(true).then(render).catch(() => {});
-    try {
-      await loadRoute();
-      startAutoRefresh();
-    } catch (err) {
-      toast(err.message || "Could not load dopes");
-    }
-  } catch (err) { toast(err.message); }
-};
 $("logout").onclick = async () => {
-  await api("/api/auth/logout", { method: "POST" });
-  stopAutoRefresh();
-  clearInterval(state.diagTimer);
-  state.diagTimer = null;
-  clearInterval(state.settingsTimer);
-  state.settingsTimer = null;
-  state.nextResetAt = null;
-  state.user = null;
-  showAuth();
+  try { await api("/api/auth/logout", {method: "POST"}); endSession(); }
+  catch (err) { toast(err.message); }
 };
 $("profile-open").onclick = openProfile;
 $("settings-open").onclick = openSettings;
@@ -2210,7 +2062,12 @@ $("filter-open").onclick = async () => {
   $("filter-created-from").value = state.filters.createdFrom;
   $("filter-created-to").value = state.filters.createdTo;
   $("filter-deps-doped").checked = state.filters.depsDoped;
-  $("filter-completed-by").value = state.filters.completedBy;
+  const filterUser = $("filter-completed-by");
+  filterUser.value = state.filters.completedBy;
+  filterUser.dataset.member = state.filters.completedById || "";
+  if (!filterUser._picker) filterUser._picker = attachPicker(filterUser, {membersOnly: true, historical: true,
+    onPick: person => { filterUser.dataset.member = person?.local_id || ""; }});
+  filterUser._picker.reset();
   $("filter-from").value = state.filters.from;
   $("filter-to").value = state.filters.to;
   $("filter-dialog").showModal();
@@ -2225,6 +2082,7 @@ $("filter-apply").onclick = (event) => {
     createdTo: $("filter-created-to").value,
     depsDoped: $("filter-deps-doped").checked,
     completedBy: $("filter-completed-by").value,
+    completedById: Number($("filter-completed-by").dataset.member) || null,
     from: $("filter-from").value,
     to: $("filter-to").value,
   };
@@ -2267,6 +2125,7 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("focus", () => refreshVisibleData({ force: true }));
 window.addEventListener("online", () => refreshVisibleData({ force: true }));
 window.addEventListener("hashchange", async () => {
+  if (!state.user) return;
   try {
     await loadRoute();
   } catch (err) {
@@ -2276,4 +2135,3 @@ window.addEventListener("hashchange", async () => {
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/static/sw.js").catch(() => {});
 }
-init();

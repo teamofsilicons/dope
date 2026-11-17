@@ -1,36 +1,10 @@
-const CACHE_NAME = "dope-shell-20260728-reset-window-10m";
-const SHELL_ASSETS = [
-  "/",
-  "/static/app.css?v=20260728-save-for-later",
-  "/static/app.js?v=20260728-save-for-later",
-  "/static/si-logo-light.png",
-];
-
-self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_ASSETS)));
-  self.skipWaiting();
-});
-
+// Retire the password-era shell and any cached board data on the next worker update.
+self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
-  );
-  self.clients.claim();
-});
-
-self.addEventListener("fetch", (event) => {
-  const request = event.request;
-  if (request.method !== "GET") return;
-  const url = new URL(request.url);
-  if (url.pathname.startsWith("/api/")) return;
-
-  event.respondWith(
-    fetch(request)
-      .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-        return response;
-      })
-      .catch(() => caches.match(request).then((cached) => cached || caches.match("/")))
-  );
+  event.waitUntil((async () => {
+    for (const key of await caches.keys()) {
+      if (key.startsWith("dope-shell-")) await caches.delete(key);
+    }
+    await self.registration.unregister();
+  })());
 });

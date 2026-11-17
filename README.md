@@ -1,100 +1,63 @@
-# Dope
+# Silicon Dopes
 
-A simple FastAPI-backed task tracker for product teams. A feature/task is a "Dope": title, rich description with images, and an estimated time to complete.
+Sign in with Silicon Accounts and select a personal or work identity. Work accounts see an organization board and a list for each team they belong to. Each identity also has a private personal board. Organizations owns team definitions, membership and app access.
 
-## Local
+Use **New Dope** to write a description. Anyone on the board can take or complete work. **Doped** finishes it immediately. **Completion note…** adds an optional note or, for an administrator, credits another member. The original progress chart, rich cards, comments and mentions, dependencies, categories, saved work, review queue, history and diagnostics are available in each board.
 
-```bash
+The **+** in the boards sidebar creates lists in a personal, organization or team scope the signed-in identity manages. Owners can invite guests to a private board. Recipients accept in **Invitations** and open the board under **Shared with me**. Organization and team boards follow live group membership. Review and board settings use the same administrator roles.
+
+**Contacts** connects the signed-in identity’s Silicon Contacts address book, including private names, photos and trust from 1 to 255. Recipient suggestions rank invitations sent twice as heavily as invitations received, then compare recency and trust. **Files** accepts attachments up to 10 MiB and filters files shared with the viewer by sender, saved contact and minimum trust.
+
+## Run locally
+
+```sh
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-Open `http://127.0.0.1:8000`.
+Open [Dopes locally](http://127.0.0.1:8000). Python 3.11 or later is supported.
 
-## Environment
+## Configure Silicon sign-in
 
-- `DOPE_DB_PATH`: optional SQLite path. Defaults to `./dope.db`.
-- `DOPE_SECRET_KEY`: optional cookie signing secret. Set this in production.
+The registered app ID is `dope`, owned by Saket Agents. Its hosted sign-in uses PKCE and works with the repository defaults. The production callback is `https://dopes.teamofsilicons.com/api/auth/callback`. The loopback callbacks support `127.0.0.1`, `localhost` and `[::1]` at `/api/auth/callback`. The hosted chooser supports linked personal and work identities.
 
-## API
+| Environment variable | Purpose |
+| --- | --- |
+| `DOPE_ACCOUNTS_APP_ID` | Registered Accounts app ID. Defaults to `dope`. |
+| `DOPE_ACCOUNTS_APP_SECRET` | Server-only app secret for Interface token introspection, recipient lookup and Contacts proofs. Hosted PKCE alone can run as a public client. |
+| `DOPE_REGISTRATION_FILE` | Alternative to the secret environment variable. Read `app_secret` from a private registration JSON file at this path. |
+| `DOPE_CONTACTS_URL` | Contacts origin. Defaults to `https://contacts.teamofsilicons.com`. |
+| `DOPE_PUBLIC_URL` | Public origin used in the callback and for cookie requests. Defaults to the incoming origin on loopback and `https://dopes.teamofsilicons.com` elsewhere. |
+| `DOPE_ACCOUNTS_URL` | Accounts origin. Defaults to `https://accounts.teamofsilicons.com`. |
+| `DOPE_ORGANIZATIONS_URL` | Organizations origin. Defaults to `https://organizations.teamofsilicons.com`. |
+| `DOPE_DB_PATH` | Base database path, default `./dope.db` in the repository. Sessions and board databases live in the adjacent `<path>.boards/` directory. Keep this directory private and include it in backups. |
 
-Every endpoint works with the browser session cookie or an API key created in
-Profile → API keys, sent as `Authorization: Bearer <key>`.
+Dopes uses authorization code sign-in with S256 PKCE and server-side refresh. On each board request it reads current membership from `/v1/integrations/{app}/me`. The account UUID and group IDs keep personal data and team data separate across handle and team renames.
 
-### Comments
+## Existing installations
 
-Each dope has a comment thread. Mentions are extracted from the body by
-matching `@username` or `@display name` against real users.
+The original shared database has no organization or team attached to it. Choose its destination explicitly before opening that board. Get the exact group ID from `GET /api/boards`. Listing boards does not create their task databases.
 
-- `GET /api/users` — all members, each with `online` (active in the last 5
-  minutes) and `last_seen_at`. Used for the `@` mention picker.
-- `GET /api/dopes/{id}/comments` — the thread, oldest first. Each comment has
-  `id`, `body`, `created_at`, `user`, and `mentions`.
-- `POST /api/dopes/{id}/comments` — body `{"body": "text with @mentions"}`.
-- `DELETE /api/dopes/{id}/comments/{comment_id}` — author only.
-- `POST /api/dopes/{id}/comments/read` — mark the thread read for the caller.
-
-Dope payloads from `GET /api/dopes` include `comment_count`,
-`unread_comments`, `unread_mentions`, and `latest_comment_at` for the caller,
-which power the new-message badges.
-
-### Save for later
-
-- `POST /api/dopes/{id}/save-for-later` — move an active dope to the Saved
-  tab and exclude it from progress and diagnostics analytics.
-- `POST /api/dopes/{id}/move-to-active` — return a saved dope to Active while
-  preserving its assignment and history.
-- `GET /api/dopes?status=saved` — list saved dopes, newest saved first.
-
-### Settings
-
-- `GET /api/settings/dope-day` — Saket-only reset-time settings, including the
-  next reset and remaining seconds in IST.
-- `PUT /api/settings/dope-day` — Saket-only update with body
-  `{"reset_time": "09:00"}`. Each update re-buckets only completions from the
-  preceding 10 minutes; older progress keeps its prior reset rule.
-
-### Diagnostics
-
-- `GET /api/diagnostics?limit=50` — team-wide overview (in the UI it's a
-  dedicated page at `#diagnostics`, opened by the pulse icon, top right):
-  - `totals` — active/completed/archived counts and minutes, plus how much
-    is remaining split into `ready`, `in_progress`, and `blocked`.
-  - `remaining_by_category` — open work grouped by category.
-  - `per_person` — per member: completed (all-time and last 7 days),
-    in-progress load, dopes created, comments posted, online status.
-  - `activity` — newest-first feed of everything that happened: created,
-    assigned, unassigned (with reason), completed, archived, edited,
-    commented. `limit` caps the feed (max 200).
-
-```bash
-curl -s -H "Authorization: Bearer $DOPE_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"body": "Deployed, please verify @saket"}' \
-  https://example.com/api/dopes/42/comments
+```sh
+# Run on the stopped installation with its normal DOPE_DB_PATH.
+python -m app.storage 'team:your-org/your-team-id'
+# Or use 'organization:your-org' for the organization-wide board.
 ```
 
-## Deploy
+This copies the original SQLite database, including dopes, rich descriptions, comment threads, historical commit links and assignments. It refuses to overwrite an existing board. Original users remain credited in history. Silicon identities are matched by verified account UUID. Password sessions and API keys from the global board retire at cutover.
 
-The app runs as a systemd service behind nginx (see `deploy/`). To ship from
-your laptop in one command:
+## Interface API
 
-```bash
-./deploy/ship.sh
-```
+The [API guide](docs/interface-api.md) covers sign-in, board permissions, requests and responses, file filters, recipient lookup, pagination and retries. The [OpenAPI document](docs/openapi.json) can be imported into interface tooling. A running server also hosts `/docs`, `/openapi.json` and `/interface-api`.
 
-It pushes `main`, runs the server-side deploy over SSH, and verifies the
-deployed commit matches local. It expects the server key at `~/.ssh/dope.pem`
-(or `~/Downloads/dope.pem`); override with `DOPE_SSH_KEY`, `DOPE_SSH_HOST`,
-or `DOPE_SSH_USER` if your setup differs.
+## Verify and deploy
 
-Alternatively, run the server-side script directly on the box:
+Run `python -m pytest -q` with pytest installed. The browser workflow uses local test providers and checks two teammates on desktop and mobile. Install Playwright and Chromium, then run `python tests/browser_boards.py`. Set `CHROMIUM_PATH` to use an existing Chrome executable.
 
-```bash
-sudo /srv/dope/deploy/deploy.sh
-```
+Production runs at [dopes.teamofsilicons.com](https://dopes.teamofsilicons.com) on the `silicon-dopes-prod` Lightsail instance in `us-east-1`. The Linux Nano plan has 512 MB of RAM, a 20 GB SSD and one static IPv4 address. Nginx terminates HTTPS and Certbot renews the certificate using the webroot at `/var/www/letsencrypt`. Systemd runs a single application worker as `dope`.
 
-It fetches `main`, syncs dependencies, restarts the `dope` service, and runs a
-smoke check. DB migrations run automatically on startup.
+The host keeps `DOPE_PUBLIC_URL`, `DOPE_REGISTRATION_FILE` and `DOPE_DB_PATH` in `/etc/dope.env`. The app registration is readable by the service group at `/etc/dope/registration.json`, and board data is in `/var/lib/dope/dope.db.boards/`.
+
+Run `./deploy/ship.sh` from the clean release branch. It uses the `silicon-deployment` AWS profile for temporary SSH credentials and verifies the host keys supplied by Lightsail. The instance firewall allows SSH from the deployment network and the Lightsail browser console. The server checks the requested Git revision and tests the API after restarting.

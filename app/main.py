@@ -1,43 +1,74 @@
 from __future__ import annotations
 
-import base64
+import html
 import hashlib
-import hmac
-import json
 import os
 import re
 import secrets
 import sqlite3
-import time
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from functools import lru_cache
+from html.parser import HTMLParser
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Cookie, FastAPI, Header, HTTPException, Response
+import markdown
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, Response, HTMLResponse
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import accounts, files, people, sharing, views
+from .catalog import init_catalog
+from .storage import board_path, db
+
 
 ROOT = Path(__file__).resolve().parent
-DB_PATH = Path(os.environ.get("DOPE_DB_PATH", ROOT.parent / "dope.db"))
-SECRET_KEY = os.environ.get("DOPE_SECRET_KEY", "dev-only-change-me")
-COOKIE_SECURE = os.environ.get("DOPE_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
-COOKIE_NAME = "dope_session"
-SESSION_MAX_AGE = 60 * 60 * 24 * 30
 IST_OFFSET = timedelta(hours=5, minutes=30)
 DOPE_DAY_RESET = datetime_time(hour=9)
 DEFAULT_DOPE_DAY_RESET_MINUTES = 9 * 60
 RESET_RETROACTIVE_MINUTES = 10
-REVIEWER_USERNAMES = {"saket", "brainspoof"}
-DELEGATED_COMPLETION_USERNAME = "saket"
-SETTINGS_USERNAME = "saket"
 COMBINED_DOPE_DAYS = {date(2026, 7, 20): date(2026, 7, 21)}
 
-app = FastAPI(title="Dope")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    accounts.init_sessions()
+    init_catalog()
+    yield
+
+
+app = FastAPI(title="Silicon Dopes", version="1.0", lifespan=lifespan,
+              description="Boards, dopes, invitations, contacts and files. See the [interface guide](/interface-api).")
+app.include_router(accounts.router)
+app.include_router(sharing.router)
+app.include_router(people.router)
+app.include_router(files.router)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+
+
+@app.middleware("http")
+async def private_responses(request: Request, call_next):
+    origin = request.headers.get("origin")
+    foreign = origin and origin != accounts.origin(request)
+    bearer = request.headers.get("authorization", "").lower().startswith("bearer ")
+    external_api = request.url.path.startswith("/api/") and not request.url.path.startswith("/api/auth/")
+    cors = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Dope-Board, X-Dope-Account, Idempotency-Key",
+            "Access-Control-Expose-Headers": "Content-Disposition, Retry-After", "Access-Control-Max-Age": "600"}
+    if foreign and external_api and request.method == "OPTIONS":
+        return Response(status_code=204, headers=cors)
+    if foreign and request.method not in {"HEAD", "GET", "OPTIONS"} and not (bearer and external_api):
+        return JSONResponse({"detail": "Cross-origin writes require an app access token."}, status_code=403)
+    response = await call_next(request)
+    if foreign and bearer and external_api:
+        response.headers.update(cors)
+    if not request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 def utc_now() -> datetime:
@@ -74,23 +105,12 @@ def current_dope_day(reset_time: datetime_time = DOPE_DAY_RESET) -> date:
     return dope_day_for(utc_now(), reset_time)
 
 
-@contextmanager
-def db() -> Iterator[sqlite3.Connection]:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        with conn:
-            yield conn
-    finally:
-        conn.close()
-
-
-def init_db() -> None:
-    with db() as conn:
+@lru_cache(maxsize=512)
+def init_db(path: Path) -> None:
+    with db(path) as conn:
         conn.executescript(
             """
+            BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS users (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -100,6 +120,10 @@ def init_db() -> None:
               created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS create_receipts (
+              user_id INTEGER NOT NULL REFERENCES users(id), operation TEXT NOT NULL, kind TEXT NOT NULL,
+              fingerprint TEXT NOT NULL, item_id INTEGER NOT NULL, PRIMARY KEY (user_id, operation)
+            );
             CREATE TABLE IF NOT EXISTS dopes (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               title TEXT NOT NULL,
@@ -239,6 +263,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN color TEXT NOT NULL DEFAULT '#1a1a1a'")
         if "last_seen_at" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT")
+        for name in ("account_uuid", "account_handle", "accounts_name"):
+            if name not in user_columns:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {name} TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_account_uuid ON users(account_uuid)")
         dope_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(dopes)").fetchall()
@@ -283,136 +311,114 @@ def init_db() -> None:
             )
 
 
-@app.on_event("startup")
-def startup() -> None:
-    init_db()
+@dataclass(frozen=True)
+class BoardMember:
+    path: Path
+    board: accounts.Board
+    user: sqlite3.Row
+    browser_session: str | None
 
 
-def hash_password(password: str) -> str:
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 240_000)
-    return base64.b64encode(salt).decode() + "$" + base64.b64encode(digest).decode()
+def board_member(
+    board_id: str | None = Header(default=None, alias="X-Dope-Board"),
+    expected_account: str | None = Header(default=None, alias="X-Dope-Account"),
+    context: accounts.Access = Depends(accounts.access),
+) -> BoardMember:
+    if expected_account is not None and expected_account != context.account.uuid:
+        raise HTTPException(409, "The signed-in account changed. Reload your boards.")
+    selected = next((b for b in context.boards if b.id == board_id), None) if board_id is not None else context.boards[0]
+    if selected is None:
+        raise HTTPException(403, "You do not have access to this board.")
+    path = board_path(selected.id)
+    init_db(path)
+    account = context.account
+    with db(path) as conn:
+        user = conn.execute("SELECT * FROM users WHERE account_uuid=?", (account.uuid,)).fetchone()
+        if (not user or user["account_handle"] != account.handle or user["accounts_name"] != account.display_name
+                or not is_online(user["last_seen_at"], timedelta(minutes=1))):
+            # The legacy username is unique and may belong to an unverified password account.
+            # Only the immutable Accounts UUID can ever link a sign-in to a board member.
+            now = now_iso()
+            conn.execute("""
+                INSERT INTO users (username, password_hash, display_name, created_at, last_seen_at,
+                                   account_uuid, account_handle, accounts_name)
+                VALUES (?, '', ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_uuid) DO UPDATE SET
+                    display_name=CASE WHEN users.display_name=users.accounts_name THEN excluded.display_name
+                                      ELSE users.display_name END,
+                    accounts_name=excluded.accounts_name, account_handle=excluded.account_handle,
+                    last_seen_at=excluded.last_seen_at
+                """, ("accounts/" + secrets.token_hex(16), account.display_name, now, now,
+                      account.uuid, account.handle, account.display_name))
+            user = conn.execute("SELECT * FROM users WHERE account_uuid=?", (account.uuid,)).fetchone()
+    return BoardMember(path, selected, user, context.browser_session)
 
 
-def verify_password(password: str, stored: str) -> bool:
-    try:
-        salt_b64, digest_b64 = stored.split("$", 1)
-        salt = base64.b64decode(salt_b64)
-        expected = base64.b64decode(digest_b64)
-    except Exception:
-        return False
-    actual = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 240_000)
-    return hmac.compare_digest(actual, expected)
-
-
-def sign(payload: dict[str, Any]) -> str:
-    raw = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
-    sig = hmac.new(SECRET_KEY.encode(), raw.encode(), hashlib.sha256).hexdigest()
-    return f"{raw}.{sig}"
-
-
-def unsign(token: str | None) -> dict[str, Any] | None:
-    if not token or "." not in token:
-        return None
-    raw, sig = token.rsplit(".", 1)
-    expected = hmac.new(SECRET_KEY.encode(), raw.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, expected):
-        return None
-    try:
-        payload = json.loads(base64.urlsafe_b64decode(raw.encode()))
-    except Exception:
-        return None
-    if payload.get("exp", 0) < int(time.time()):
-        return None
-    return payload
-
-
-def set_session(response: Response, user_id: int) -> None:
-    token = sign({"sub": user_id, "exp": int(time.time()) + SESSION_MAX_AGE})
-    response.set_cookie(
-        COOKIE_NAME,
-        token,
-        max_age=SESSION_MAX_AGE,
-        httponly=True,
-        samesite="lax",
-        secure=COOKIE_SECURE,
-    )
-
-
-def hash_api_key(key: str) -> str:
-    return hmac.new(SECRET_KEY.encode(), key.encode(), hashlib.sha256).hexdigest()
-
-
-def touch_last_seen(conn: sqlite3.Connection, user: sqlite3.Row) -> None:
-    last_seen = user["last_seen_at"] if "last_seen_at" in user.keys() else None
-    if last_seen:
-        try:
-            if datetime.now(timezone.utc) - parse_iso_datetime(last_seen) < timedelta(seconds=60):
-                return
-        except ValueError:
-            pass
-    conn.execute("UPDATE users SET last_seen_at = ? WHERE id = ?", (now_iso(), user["id"]))
-
-
-def current_user(dope_session: str | None = None, authorization: str | None = None) -> sqlite3.Row:
-    if authorization and authorization.lower().startswith("bearer "):
-        key = authorization.split(" ", 1)[1].strip()
-        if key:
-            digest = hash_api_key(key)
-            with db() as conn:
-                api_key = conn.execute(
-                    "SELECT * FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL",
-                    (digest,),
-                ).fetchone()
-                if api_key:
-                    conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (now_iso(), api_key["id"]))
-                    user = conn.execute("SELECT * FROM users WHERE id = ?", (api_key["user_id"],)).fetchone()
-                    if user:
-                        touch_last_seen(conn, user)
-                        return user
-    payload = unsign(dope_session)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Not signed in")
-    with db() as conn:
-        user = conn.execute("SELECT * FROM users WHERE id = ?", (payload["sub"],)).fetchone()
-        if user:
-            touch_last_seen(conn, user)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not signed in")
-    return user
-
-
-class AuthIn(BaseModel):
-    username: str = Field(min_length=2, max_length=80)
-    password: str = Field(min_length=4, max_length=200)
-    display_name: str | None = Field(default=None, max_length=120)
+def require_manager(member: BoardMember) -> None:
+    if not member.board.can_manage:
+        raise HTTPException(403, "This action requires a board administrator.")
 
 
 class DopeIn(BaseModel):
-    title: str = Field(min_length=1, max_length=180)
-    description_html: str = Field(min_length=1, max_length=250_000)
-    time_text: str = Field(min_length=1, max_length=40)
+    description: str | None = Field(default=None, max_length=20_000)
+    title: str | None = Field(default=None, max_length=180)
+    description_html: str | None = Field(default=None, max_length=250_000)
+    time_text: str | None = Field(default=None, max_length=40)
     dependency_ids: list[int] = Field(default_factory=list, max_length=50)
-    category_id: int | None = Field(default=None)
+    category_id: int | None = None
 
-
-class DopeEditIn(BaseModel):
-    title: str = Field(min_length=1, max_length=180)
-    description_html: str = Field(min_length=1, max_length=250_000)
-    time_text: str = Field(min_length=1, max_length=40)
-    dependency_ids: list[int] = Field(default_factory=list, max_length=50)
-    category_id: int | None = Field(default=None)
+    def content(self) -> tuple[str, str]:
+        if self.description is not None:
+            text = self.description.strip()
+            if not text:
+                raise HTTPException(400, "Write a description for the dope.")
+            return (self.title or "").strip() or text.splitlines()[0][:180], html.escape(text).replace("\n", "<br>")
+        if not (self.description_html or "").strip():
+            raise HTTPException(400, "Write a description for the dope.")
+        title = (self.title or "").strip() or plain_description(self.description_html)[:180]
+        if not title:
+            raise HTTPException(400, "Add a title or a text description.")
+        return title, self.description_html
 
 
 class UnassignIn(BaseModel):
-    reason: str = Field(min_length=1, max_length=500)
+    reason: str = Field(default="", max_length=500)
 
 
 class CompleteIn(BaseModel):
+    description: str = Field(default="", max_length=20_000)
     completion_text: str | None = Field(default=None, max_length=30_000)
     commit_links: list[str] = Field(default_factory=list, max_length=50)
     completion_description: str = Field(default="", max_length=20_000)
     completed_for_user_id: int | None = Field(default=None, gt=0)
+
+
+class DescriptionText(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+    def handle_starttag(self, tag, attrs) -> None:
+        if tag == "br":
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag) -> None:
+        if tag in ("p", "div", "li"):
+            self.parts.append("\n")
+
+
+def plain_description(value: str) -> str:
+    parser = DescriptionText()
+    try:
+        parser.feed(value)
+        parser.close()
+    except (AssertionError, ValueError):
+        # Old rich descriptions can contain malformed markup; they remain readable as text.
+        return value.strip()
+    return "".join(parser.parts).strip()
 
 
 class ReviewRequestIn(BaseModel):
@@ -501,21 +507,7 @@ def status_for(row: sqlite3.Row) -> str:
 def user_public(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if not row:
         return None
-    return {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}
-
-
-def is_reviewer_user(row: sqlite3.Row | None) -> bool:
-    return bool(row and str(row["username"]).strip().lower() in REVIEWER_USERNAMES)
-
-
-def require_reviewer(user: sqlite3.Row) -> None:
-    if not is_reviewer_user(user):
-        raise HTTPException(status_code=403, detail="Review access is limited to Saket and Brainspoof")
-
-
-def require_settings_user(user: sqlite3.Row) -> None:
-    if str(user["username"]).strip().lower() != SETTINGS_USERNAME:
-        raise HTTPException(status_code=403, detail="Settings access is limited to Saket")
+    return {"id": row["id"], "username": row["account_handle"] or row["username"], "display_name": row["display_name"], "color": row["color"]}
 
 
 def reset_time_from_minutes(minutes: int) -> datetime_time:
@@ -760,11 +752,11 @@ def incomplete_dependency_rows(conn: sqlite3.Connection, dope_id: int) -> list[s
 ONLINE_WINDOW = timedelta(minutes=5)
 
 
-def is_online(last_seen_at: str | None) -> bool:
+def is_online(last_seen_at: str | None, window: timedelta = ONLINE_WINDOW) -> bool:
     if not last_seen_at:
         return False
     try:
-        return datetime.now(timezone.utc) - parse_iso_datetime(last_seen_at) <= ONLINE_WINDOW
+        return datetime.now(timezone.utc) - parse_iso_datetime(last_seen_at) <= window
     except ValueError:
         return False
 
@@ -774,7 +766,7 @@ def extract_mention_user_ids(conn: sqlite3.Connection, body: str) -> list[int]:
     if "@" not in text:
         return []
     ids: list[int] = []
-    for row in conn.execute("SELECT id, username, display_name FROM users").fetchall():
+    for row in conn.execute("SELECT id, COALESCE(account_handle, username) AS username, display_name FROM users").fetchall():
         tokens = {row["username"].strip().lower(), row["display_name"].strip().lower()}
         for token in tokens:
             if not token:
@@ -878,7 +870,7 @@ def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection, viewer_id: int | No
     versions = conn.execute(
         """
         SELECT v.id, v.version_number, v.title, v.description_html, v.edited_by, v.edited_at,
-               u.username AS editor_username, u.display_name AS editor_display_name
+               COALESCE(u.account_handle, u.username) AS editor_username, u.display_name AS editor_display_name
         FROM dope_versions v
         JOIN users u ON u.id = v.edited_by
         WHERE v.dope_id = ?
@@ -910,6 +902,7 @@ def dope_payload(row: sqlite3.Row, conn: sqlite3.Connection, viewer_id: int | No
         "category": category,
         **comment_meta(conn, row["id"], viewer_id),
         "description_html": row["description_html"],
+        "description": plain_description(row["description_html"]),
         "time_minutes": row["time_minutes"],
         "created_at": row["created_at"],
         "assigned_at": row["assigned_at"],
@@ -985,59 +978,38 @@ def index() -> FileResponse:
     return FileResponse(ROOT / "templates" / "index.html")
 
 
-@app.post("/api/auth/signup")
-def signup(data: AuthIn) -> dict[str, Any]:
-    username = data.username.strip()
-    display_name = (data.display_name or "").strip()
-    if not display_name:
-        raise HTTPException(status_code=400, detail="Display name is required")
-    with db() as conn:
-        try:
-            conn.execute(
-                "INSERT INTO users (username, password_hash, display_name, created_at) VALUES (?, ?, ?, ?)",
-                (username, hash_password(data.password), display_name, now_iso()),
-            )
-        except sqlite3.IntegrityError:
-            raise HTTPException(status_code=409, detail="Username already exists") from None
-    return {"ok": True, "username": username}
+@app.get("/interface-api", response_class=HTMLResponse, include_in_schema=False)
+@lru_cache(maxsize=1)
+def interface_guide():
+    guide = (ROOT.parent / "docs/interface-api.md").read_text()
+    body = markdown.markdown(guide.replace("](openapi.json)", "](/openapi.json)"), extensions=["fenced_code", "tables"])
+    return HTMLResponse('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                        '<title>Silicon Dopes interface API</title><link rel="stylesheet" href="/static/vendor/fonts.css">'
+                        '<style>body{max-width:84ch;margin:2rem auto;padding:0 1rem;background:#ede8e0;color:#1a1a1a;'
+                        'font:1rem/1.55 Inter,sans-serif}pre,table{display:block;overflow:auto}code{overflow-wrap:anywhere}'
+                        'th,td{padding:.4rem;text-align:left;border-bottom:1px solid #d4cfc7}a{color:#244f65}</style>'
+                        '<nav><a href="/docs">Interactive reference</a> · <a href="/openapi.json">OpenAPI JSON</a></nav><main>'
+                        + body + '</main></html>')
 
 
-@app.post("/api/auth/login")
-def login(data: AuthIn, response: Response) -> dict[str, Any]:
-    with db() as conn:
-        user = conn.execute("SELECT * FROM users WHERE username = ?", (data.username.strip(),)).fetchone()
-    if not user or not verify_password(data.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Incorrect username or password")
-    set_session(response, user["id"])
-    return {"ok": True}
-
-
-@app.post("/api/auth/logout")
-def logout(response: Response) -> dict[str, Any]:
-    response.delete_cookie(COOKIE_NAME)
-    return {"ok": True}
-
-
-@app.get("/api/me")
+@app.get("/api/me", response_model=views.BoardUser)
 def me(
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    return user_public(current_user(user_cookie, authorization))  # type: ignore[return-value]
+    return user_public(member.user)  # type: ignore[return-value]
 
 
 @app.patch("/api/me")
 def update_me(
     data: ProfileIn,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
+    user = member.user
     display_name = data.display_name.strip()
     if not display_name:
         raise HTTPException(status_code=400, detail="Display name is required")
     color = normalize_color(data.color)
-    with db() as conn:
+    with db(member.path, write=True) as conn:
         conn.execute(
             "UPDATE users SET display_name = ?, color = ? WHERE id = ?",
             (display_name, color, user["id"]),
@@ -1046,57 +1018,47 @@ def update_me(
     return user_public(updated)  # type: ignore[return-value]
 
 
+def browser_member(member: BoardMember = Depends(board_member)) -> BoardMember:
+    if not member.browser_session:
+        raise HTTPException(403, "Sign in through the browser to manage API keys.")
+    return member
+
+
 @app.get("/api/me/keys")
-def list_api_keys(user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> list[dict[str, Any]]:
-    user = current_user(user_cookie)
-    with db() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, name, prefix, created_at, last_used_at, revoked_at
-            FROM api_keys
-            WHERE user_id = ? AND revoked_at IS NULL
-            ORDER BY created_at DESC
-            """,
-            (user["id"],),
-        ).fetchall()
+def list_api_keys(member: BoardMember = Depends(browser_member)) -> list[dict]:
+    with accounts.session_db() as conn:
+        rows = conn.execute("SELECT id, name, prefix, created_at, last_used_at FROM board_keys "
+                            "WHERE session_hash=? AND board_id=? ORDER BY id DESC",
+                            (member.browser_session, member.board.id)).fetchall()
     return [dict(row) for row in rows]
 
 
 @app.post("/api/me/keys")
-def create_api_key(data: ApiKeyIn, user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> dict[str, Any]:
-    user = current_user(user_cookie)
-    key = f"dope_{secrets.token_urlsafe(32)}"
-    prefix = key[:14]
-    created_at = now_iso()
-    with db() as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO api_keys (user_id, name, key_hash, prefix, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (user["id"], data.name.strip() or "API key", hash_api_key(key), prefix, created_at),
-        )
-    return {"id": int(cur.lastrowid), "name": data.name.strip() or "API key", "prefix": prefix, "created_at": created_at, "key": key}
+def create_api_key(data: ApiKeyIn, member: BoardMember = Depends(browser_member)) -> dict:
+    key = "dope_" + secrets.token_urlsafe(32)
+    name, created_at = data.name.strip() or "API key", now_iso()
+    with accounts.session_db() as conn:
+        row = conn.execute("INSERT INTO board_keys (session_hash, board_id, key_hash, prefix, name, created_at) "
+                           "VALUES (?, ?, ?, ?, ?, ?)",
+                           (member.browser_session, member.board.id, accounts.digest(key), key[:14], name, created_at))
+    return {"id": row.lastrowid, "name": name, "key": key, "prefix": key[:14], "created_at": created_at}
 
 
 @app.delete("/api/me/keys/{key_id}")
-def revoke_api_key(key_id: int, user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> dict[str, Any]:
-    user = current_user(user_cookie)
-    with db() as conn:
-        row = conn.execute("SELECT * FROM api_keys WHERE id = ? AND user_id = ?", (key_id, user["id"])).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="API key not found")
-        conn.execute("UPDATE api_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?", (now_iso(), key_id))
+def revoke_api_key(key_id: int, member: BoardMember = Depends(browser_member)) -> dict:
+    with accounts.session_db() as conn:
+        changed = conn.execute("DELETE FROM board_keys WHERE id=? AND board_id=? AND session_hash=?",
+                               (key_id, member.board.id, member.browser_session))
+        if not changed.rowcount:
+            raise HTTPException(404, "API key not found.")
     return {"ok": True}
 
 
-@app.get("/api/categories")
+@app.get("/api/categories", response_model=list[views.Category])
 def list_categories(
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> list[dict[str, Any]]:
-    current_user(user_cookie, authorization)
-    with db() as conn:
+    with db(member.path) as conn:
         rows = conn.execute(
             "SELECT id, name, color FROM categories ORDER BY position, id"
         ).fetchall()
@@ -1106,15 +1068,13 @@ def list_categories(
 @app.post("/api/categories")
 def create_category(
     data: CategoryIn,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    current_user(user_cookie, authorization)
     name = data.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Category name is required")
     color = normalize_color(data.color)
-    with db() as conn:
+    with db(member.path, write=True) as conn:
         position = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM categories").fetchone()[0]
         try:
             cur = conn.execute(
@@ -1131,15 +1091,13 @@ def create_category(
 def update_category(
     category_id: int,
     data: CategoryIn,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    current_user(user_cookie, authorization)
     name = data.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Category name is required")
     color = normalize_color(data.color)
-    with db() as conn:
+    with db(member.path, write=True) as conn:
         if not conn.execute("SELECT 1 FROM categories WHERE id = ?", (category_id,)).fetchone():
             raise HTTPException(status_code=404, detail="Category not found")
         try:
@@ -1156,11 +1114,9 @@ def update_category(
 @app.delete("/api/categories/{category_id}")
 def delete_category(
     category_id: int,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    current_user(user_cookie, authorization)
-    with db() as conn:
+    with db(member.path, write=True) as conn:
         if not conn.execute("SELECT 1 FROM categories WHERE id = ?", (category_id,)).fetchone():
             raise HTTPException(status_code=404, detail="Category not found")
         conn.execute("UPDATE dopes SET category_id = NULL WHERE category_id = ?", (category_id,))
@@ -1168,13 +1124,37 @@ def delete_category(
     return {"ok": True}
 
 
-@app.get("/api/dopes")
+@app.get("/api/board")
+def board_overview(member: BoardMember = Depends(board_member)) -> dict:
+    # One query for the list. Detailed history, rich text and threads stay on the dope API.
+    with db(member.path) as conn:
+        rows = conn.execute("""
+            SELECT d.id, d.title, d.description_html, d.created_at, d.completed_at, d.saved_at,
+                   d.archived_at, d.completion_description, d.review_requested_at, d.review_approved_at,
+                   d.review_rejected_at, d.assigned_to, creator.display_name AS creator,
+                   assignee.display_name AS assignee, finisher.display_name AS finisher,
+                   EXISTS (SELECT 1 FROM dope_dependencies deps JOIN dopes parent ON parent.id=deps.depends_on_id
+                           WHERE deps.dope_id=d.id AND parent.completed_at IS NULL) AS blocked
+            FROM dopes d JOIN users creator ON d.created_by=creator.id
+            LEFT JOIN users assignee ON d.assigned_to=assignee.id
+            LEFT JOIN users finisher ON d.completed_by=finisher.id
+            ORDER BY COALESCE(d.completed_at, d.created_at) DESC, d.id DESC
+        """).fetchall()
+    items = [{
+        "id": r["id"], "title": r["title"], "description": plain_description(r["description_html"]),
+        "status": status_for(r), "creator": r["creator"], "created_at": r["created_at"],
+        "assignee": r["assignee"], "assigned_to": r["assigned_to"], "finisher": r["finisher"],
+        "completed_at": r["completed_at"], "note": r["completion_description"], "blocked": bool(r["blocked"]),
+    } for r in rows]
+    return {"board": member.board, "viewer_id": member.user["id"], "dopes": items}
+
+
+@app.get("/api/dopes", response_model=list[views.Dope])
 def list_dopes(
     status: str = "active",
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> list[dict[str, Any]]:
-    user = current_user(user_cookie, authorization)
+    user = member.user
     where = {
         "active": "archived_at IS NULL AND completed_at IS NULL AND saved_at IS NULL",
         "saved": "archived_at IS NULL AND completed_at IS NULL AND saved_at IS NOT NULL",
@@ -1186,7 +1166,7 @@ def list_dopes(
     if not where:
         raise HTTPException(status_code=400, detail="Bad status")
     if status == "review":
-        require_reviewer(user)
+        require_manager(member)
     if status == "active":
         order = """
         CASE
@@ -1260,7 +1240,7 @@ def list_dopes(
         completed_at DESC,
         id DESC
         """ if status in {"completed", "review"} else "id DESC"
-    with db() as conn:
+    with db(member.path) as conn:
         rows = conn.execute(f"SELECT * FROM dopes WHERE {where} ORDER BY {order}").fetchall()
         payloads = [dope_payload(row, conn, user["id"]) for row in rows]
     if status == "active":
@@ -1281,12 +1261,10 @@ def list_dopes(
 
 @app.get("/api/settings/dope-day")
 def get_dope_day_settings(
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    require_settings_user(user)
-    with db() as conn:
+    require_manager(member)
+    with db(member.path) as conn:
         row = conn.execute(
             "SELECT * FROM dope_day_reset_changes ORDER BY changed_at DESC, id DESC LIMIT 1"
         ).fetchone()
@@ -1296,15 +1274,14 @@ def get_dope_day_settings(
 @app.put("/api/settings/dope-day")
 def update_dope_day_settings(
     data: DopeDaySettingsIn,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    require_settings_user(user)
+    user = member.user
+    require_manager(member)
     reset_minutes = parse_reset_time(data.reset_time)
     changed_at = utc_now().astimezone(timezone.utc)
     retroactive_from = changed_at - timedelta(minutes=RESET_RETROACTIVE_MINUTES)
-    with db() as conn:
+    with db(member.path, write=True) as conn:
         row = conn.execute(
             "SELECT * FROM dope_day_reset_changes ORDER BY changed_at DESC, id DESC LIMIT 1"
         ).fetchone()
@@ -1332,14 +1309,12 @@ def update_dope_day_settings(
 @app.get("/api/stats/progress")
 def progress_stats(
     days: int = 7,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> list[dict[str, Any]]:
-    current_user(user_cookie, authorization)
     if days not in {7, 14, 30}:
         raise HTTPException(status_code=400, detail="Progress range must be 7, 14, or 30 days")
 
-    with db() as conn:
+    with db(member.path) as conn:
         reset_changes = load_reset_changes(conn)
         current_reset_minutes = (
             int(reset_changes[-1]["reset_minutes"])
@@ -1404,70 +1379,87 @@ def progress_stats(
     return payload
 
 
-@app.post("/api/dopes")
+def previous_create(conn, user_id, key, kind, data):
+    fingerprint = hashlib.sha256(data.model_dump_json().encode()).hexdigest()
+    row = conn.execute("SELECT * FROM create_receipts WHERE user_id=? AND operation=?", (user_id, key)).fetchone()
+    if row and (row["kind"] != kind or row["fingerprint"] != fingerprint):
+        raise HTTPException(409, "This operation key was already used for different content.")
+    return (row["item_id"] if row else None), fingerprint
+
+
+@app.post("/api/dopes", response_model=views.Dope)
 def create_dope(
     data: DopeIn,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    key: str | None = sharing.OperationKey,
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    minutes = parse_time_to_minutes(data.time_text)
-    with db() as conn:
+    user = member.user
+    title, body = data.content()
+    minutes = parse_time_to_minutes(data.time_text) if data.time_text else 0
+    with db(member.path, write=True) as conn:
+        prior, fingerprint = previous_create(conn, user["id"], key, "dope", data)
+        if prior:
+            return dope_payload(require_dope(conn, prior), conn, user["id"])
         category_id = validate_category_id(conn, data.category_id)
         cur = conn.execute(
             """
             INSERT INTO dopes (title, description_html, time_minutes, created_by, created_at, category_id)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (data.title.strip(), data.description_html, minutes, user["id"], now_iso(), category_id),
+            (title, body, minutes, user["id"], now_iso(), category_id),
         )
         dope_id = int(cur.lastrowid)
+        if key:
+            conn.execute("INSERT INTO create_receipts VALUES (?,?,?,?,?)", (user["id"], key, "dope", fingerprint, dope_id))
         set_dope_dependencies(conn, dope_id, data.dependency_ids)
-        add_dope_version(conn, dope_id, data.title.strip(), data.description_html, user["id"], now_iso())
+        add_dope_version(conn, dope_id, title, body, user["id"], now_iso())
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (cur.lastrowid,)).fetchone()
         return dope_payload(row, conn, user["id"])
 
 
-@app.put("/api/dopes/{dope_id}")
+@app.put("/api/dopes/{dope_id}", response_model=views.Dope)
 def edit_dope(
     dope_id: int,
-    data: DopeEditIn,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    data: DopeIn,
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    title = data.title.strip()
-    minutes = parse_time_to_minutes(data.time_text)
+    user = member.user
+    title, body = data.content()
     edited_at = now_iso()
-    with db() as conn:
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or row["archived_at"]:
             raise HTTPException(status_code=404, detail="Editable dope not found")
-        category_id = validate_category_id(conn, data.category_id)
-        if row["title"] != title or row["description_html"] != data.description_html or row["time_minutes"] != minutes:
+        minutes = parse_time_to_minutes(data.time_text) if data.time_text else row["time_minutes"]
+        category_id = validate_category_id(conn, data.category_id) if "category_id" in data.model_fields_set else row["category_id"]
+        if row["title"] != title or row["description_html"] != body or row["time_minutes"] != minutes:
             conn.execute(
                 "UPDATE dopes SET title = ?, description_html = ?, time_minutes = ? WHERE id = ?",
-                (title, data.description_html, minutes, dope_id),
+                (title, body, minutes, dope_id),
             )
-            add_dope_version(conn, dope_id, title, data.description_html, user["id"], edited_at)
+            add_dope_version(conn, dope_id, title, body, user["id"], edited_at)
         if row["category_id"] != category_id:
             conn.execute("UPDATE dopes SET category_id = ? WHERE id = ?", (category_id, dope_id))
-        set_dope_dependencies(conn, dope_id, data.dependency_ids)
+        if "dependency_ids" in data.model_fields_set:
+            set_dope_dependencies(conn, dope_id, data.dependency_ids)
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/assign")
+@app.post("/api/dopes/{dope_id}/assign", response_model=views.Dope)
 def assign_dope(
     dope_id: int,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    assigned_at = now_iso()
-    with db() as conn:
+    user = member.user
+    assigned_at = now_iso_precise()
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or row["archived_at"] or row["completed_at"] or row["saved_at"]:
             raise HTTPException(status_code=404, detail="Active dope not found")
+        if row["assigned_to"] == user["id"]:
+            return dope_payload(row, conn, user["id"])
+        if row["assigned_to"] is not None:
+            raise HTTPException(409, "A teammate has already taken this dope.")
         if incomplete_dependency_rows(conn, dope_id):
             raise HTTPException(status_code=400, detail="Dependencies Undoped")
         conn.execute(
@@ -1481,22 +1473,21 @@ def assign_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/unassign")
+@app.post("/api/dopes/{dope_id}/unassign", response_model=views.Dope)
 def unassign_dope(
     dope_id: int,
-    data: UnassignIn,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    data: UnassignIn = UnassignIn(),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    unassigned_at = now_iso()
-    reason = data.reason.strip()
-    if not reason:
-        raise HTTPException(status_code=400, detail="Reason is required")
-    with db() as conn:
+    user = member.user
+    unassigned_at = now_iso_precise()
+    reason = data.reason.strip() or "Released"
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or not row["assigned_to"] or row["archived_at"] or row["completed_at"] or row["saved_at"]:
             raise HTTPException(status_code=400, detail="Dope is not assigned")
+        if row["assigned_to"] != user["id"] and not member.board.can_manage:
+            raise HTTPException(403, "Only the assignee or a board administrator can release this dope.")
         conn.execute("UPDATE dopes SET assigned_to = NULL, assigned_at = NULL WHERE id = ?", (dope_id,))
         conn.execute(
             """
@@ -1512,37 +1503,41 @@ def unassign_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/complete")
+@app.post("/api/dopes/{dope_id}/complete", response_model=views.Dope)
 def complete_dope(
     dope_id: int,
-    data: CompleteIn,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    data: CompleteIn = CompleteIn(),
+    member: BoardMember = Depends(board_member),
+    context: accounts.Access = Depends(accounts.access),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    completion_text = data.completion_text.strip() if data.completion_text is not None else data.completion_description.strip()
+    user = member.user
+    completion_text = (data.completion_text or data.completion_description or data.description).strip()
     raw_links = extract_http_links(completion_text) if data.completion_text is not None else data.commit_links
     clean_links = []
     for link in raw_links:
         clean_links.append(validate_http_url(link, "Commit links"))
-    if not clean_links:
-        raise HTTPException(status_code=400, detail="Add at least one commit link")
-    completed_at = now_iso()
-    with db() as conn:
+    completed_at = now_iso_precise()
+    eligible = None
+    if data.completed_for_user_id is not None:
+        require_manager(member)
+        eligible = people.participants(context, member.board)
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
-        if not row or row["archived_at"] or row["completed_at"] or row["saved_at"]:
+        if not row or row["archived_at"] or row["saved_at"]:
             raise HTTPException(status_code=404, detail="Active dope not found")
+        if row["completed_at"] and status_for(row) == "completed":
+            return dope_payload(row, conn, user["id"])
+        if row["completed_at"]:
+            raise HTTPException(409, "This dope is awaiting review.")
         if incomplete_dependency_rows(conn, dope_id):
             raise HTTPException(status_code=400, detail="Dependencies Undoped")
         completed_by_id = user["id"]
         if data.completed_for_user_id is not None:
-            if str(user["username"]).strip().lower() != DELEGATED_COMPLETION_USERNAME:
-                raise HTTPException(status_code=403, detail="Only Saket can mark a dope for someone else")
             completion_user = conn.execute(
-                "SELECT id FROM users WHERE id = ?",
+                "SELECT id,account_uuid FROM users WHERE id = ?",
                 (data.completed_for_user_id,),
             ).fetchone()
-            if not completion_user:
+            if not completion_user or completion_user["account_uuid"] not in eligible:
                 raise HTTPException(status_code=400, detail="Completion user not found")
             completed_by_id = completion_user["id"]
         conn.execute(
@@ -1567,20 +1562,19 @@ def complete_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/review")
+@app.post("/api/dopes/{dope_id}/review", response_model=views.Dope)
 def send_dope_for_review(
     dope_id: int,
     data: ReviewRequestIn,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
+    user = member.user
     review_note = data.note.strip()
     if not review_note:
         raise HTTPException(status_code=400, detail="Reviewer note is required")
     branch_url = validate_http_url(data.branch_url, "Review branch link")
     completed_at = now_iso()
-    with db() as conn:
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or row["archived_at"] or row["completed_at"] or row["saved_at"]:
             raise HTTPException(status_code=404, detail="Active dope not found")
@@ -1619,16 +1613,15 @@ def send_dope_for_review(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/review/approve")
+@app.post("/api/dopes/{dope_id}/review/approve", response_model=views.Dope)
 def approve_dope_review(
     dope_id: int,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    require_reviewer(user)
+    user = member.user
+    require_manager(member)
     approved_at = now_iso()
-    with db() as conn:
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or status_for(row) != "review":
             raise HTTPException(status_code=404, detail="Pending review dope not found")
@@ -1639,21 +1632,20 @@ def approve_dope_review(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/review/reject")
+@app.post("/api/dopes/{dope_id}/review/reject", response_model=views.Dope)
 def reject_dope_review(
     dope_id: int,
     data: ReviewRejectIn,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    require_reviewer(user)
+    user = member.user
+    require_manager(member)
     rejection_note = data.note.strip()
     if not rejection_note:
         raise HTTPException(status_code=400, detail="Reviewer notes are required")
     minutes = parse_time_to_minutes(data.time_text)
     rejected_at = now_iso()
-    with db() as conn:
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or status_for(row) != "review":
             raise HTTPException(status_code=404, detail="Pending review dope not found")
@@ -1692,14 +1684,13 @@ def reject_dope_review(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/uncomplete")
+@app.post("/api/dopes/{dope_id}/uncomplete", response_model=views.Dope)
 def uncomplete_dope(
     dope_id: int,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    with db() as conn:
+    user = member.user
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or row["archived_at"] or not row["completed_at"]:
             raise HTTPException(status_code=404, detail="Completed dope not found")
@@ -1749,15 +1740,14 @@ def uncomplete_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.patch("/api/dopes/{dope_id}/category")
+@app.patch("/api/dopes/{dope_id}/category", response_model=views.Dope)
 def set_dope_category(
     dope_id: int,
     data: DopeCategoryIn,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    with db() as conn:
+    user = member.user
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Dope not found")
@@ -1766,14 +1756,13 @@ def set_dope_category(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/save-for-later")
+@app.post("/api/dopes/{dope_id}/save-for-later", response_model=views.Dope)
 def save_dope_for_later(
     dope_id: int,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    with db() as conn:
+    user = member.user
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or row["archived_at"] or row["completed_at"] or row["saved_at"]:
             raise HTTPException(status_code=404, detail="Active dope not found")
@@ -1788,14 +1777,13 @@ def save_dope_for_later(
         )
 
 
-@app.post("/api/dopes/{dope_id}/move-to-active")
+@app.post("/api/dopes/{dope_id}/move-to-active", response_model=views.Dope)
 def move_saved_dope_to_active(
     dope_id: int,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    with db() as conn:
+    user = member.user
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or row["archived_at"] or row["completed_at"] or not row["saved_at"]:
             raise HTTPException(status_code=404, detail="Saved dope not found")
@@ -1810,14 +1798,13 @@ def move_saved_dope_to_active(
         )
 
 
-@app.post("/api/dopes/{dope_id}/archive")
+@app.post("/api/dopes/{dope_id}/archive", response_model=views.Dope)
 def archive_dope(
     dope_id: int,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    with db() as conn:
+    user = member.user
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Dope not found")
@@ -1828,14 +1815,13 @@ def archive_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/restore")
+@app.post("/api/dopes/{dope_id}/restore", response_model=views.Dope)
 def restore_dope(
     dope_id: int,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    with db() as conn:
+    user = member.user
+    with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Dope not found")
@@ -1845,11 +1831,9 @@ def restore_dope(
 
 @app.get("/api/users")
 def list_users(
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> list[dict[str, Any]]:
-    current_user(user_cookie, authorization)
-    with db() as conn:
+    with db(member.path) as conn:
         rows = conn.execute("SELECT * FROM users ORDER BY display_name COLLATE NOCASE, id").fetchall()
     return [
         {
@@ -1868,14 +1852,18 @@ def require_dope(conn: sqlite3.Connection, dope_id: int) -> sqlite3.Row:
     return row
 
 
+@app.get("/api/dopes/{dope_id}", response_model=views.Dope)
+def get_dope(dope_id: int, member: BoardMember = Depends(board_member)) -> dict:
+    with db(member.path) as conn:
+        return dope_payload(require_dope(conn, dope_id), conn, member.user["id"])
+
+
 @app.get("/api/dopes/{dope_id}/comments")
 def list_comments(
     dope_id: int,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> list[dict[str, Any]]:
-    current_user(user_cookie, authorization)
-    with db() as conn:
+    with db(member.path) as conn:
         require_dope(conn, dope_id)
         rows = conn.execute(
             "SELECT * FROM comments WHERE dope_id = ? ORDER BY created_at, id",
@@ -1888,21 +1876,30 @@ def list_comments(
 def create_comment(
     dope_id: int,
     data: CommentIn,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    key: str | None = sharing.OperationKey,
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
+    user = member.user
     body = data.body.strip()
     if not body:
         raise HTTPException(status_code=400, detail="Comment cannot be empty")
     created_at = now_iso_precise()
-    with db() as conn:
+    with db(member.path, write=True) as conn:
         require_dope(conn, dope_id)
+        kind = f"comments/{dope_id}"
+        prior, fingerprint = previous_create(conn, user["id"], key, kind, data)
+        if prior:
+            row = conn.execute("SELECT * FROM comments WHERE id=?", (prior,)).fetchone()
+            if not row:
+                raise HTTPException(409, "The original comment has since been removed.")
+            return comment_payload(row, conn)
         cur = conn.execute(
             "INSERT INTO comments (dope_id, user_id, body, created_at) VALUES (?, ?, ?, ?)",
             (dope_id, user["id"], body, created_at),
         )
         comment_id = int(cur.lastrowid)
+        if key:
+            conn.execute("INSERT INTO create_receipts VALUES (?,?,?,?,?)", (user["id"], key, kind, fingerprint, comment_id))
         mention_ids = extract_mention_user_ids(conn, body)
         conn.executemany(
             "INSERT OR IGNORE INTO comment_mentions (comment_id, user_id) VALUES (?, ?)",
@@ -1917,11 +1914,10 @@ def create_comment(
 def delete_comment(
     dope_id: int,
     comment_id: int,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
-    with db() as conn:
+    user = member.user
+    with db(member.path, write=True) as conn:
         row = conn.execute(
             "SELECT * FROM comments WHERE id = ? AND dope_id = ?", (comment_id, dope_id)
         ).fetchone()
@@ -1936,16 +1932,14 @@ def delete_comment(
 @app.get("/api/diagnostics")
 def diagnostics(
     limit: int = 50,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    current_user(user_cookie, authorization)
     limit = max(1, min(limit, 200))
     now = datetime.now(timezone.utc)
     week_ago = (now - timedelta(days=7)).isoformat(timespec="seconds")
     two_weeks_ago = (now - timedelta(days=14)).isoformat(timespec="seconds")
     month_ago = (now - timedelta(days=30)).isoformat(timespec="seconds")
-    with db() as conn:
+    with db(member.path) as conn:
         users = conn.execute("SELECT * FROM users ORDER BY display_name COLLATE NOCASE, id").fetchall()
         active_rows = conn.execute(
             """
@@ -2065,7 +2059,7 @@ def diagnostics(
 
         events: list[dict[str, Any]] = []
         for row in conn.execute(
-            "SELECT d.id, d.title, d.created_at AS at, u.id AS uid, u.username, u.display_name, u.color "
+            "SELECT d.id, d.title, d.created_at AS at, u.id AS uid, COALESCE(u.account_handle, u.username) AS username, u.display_name, u.color "
             "FROM dopes d JOIN users u ON u.id = d.created_by "
             "WHERE d.saved_at IS NULL ORDER BY d.created_at DESC LIMIT ?",
             (limit,),
@@ -2073,7 +2067,7 @@ def diagnostics(
             events.append(event("created", row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["id"], row["title"]))
         for row in conn.execute(
             "SELECT d.id, d.title, d.completed_at AS at, d.review_requested_at, d.review_branch_url, "
-            "u.id AS uid, u.username, u.display_name, u.color "
+            "u.id AS uid, COALESCE(u.account_handle, u.username) AS username, u.display_name, u.color "
             "FROM dopes d JOIN users u ON u.id = d.completed_by "
             "WHERE d.completed_at IS NOT NULL AND d.saved_at IS NULL "
             "ORDER BY d.completed_at DESC LIMIT ?",
@@ -2082,7 +2076,7 @@ def diagnostics(
             kind = "reviewed" if row["review_requested_at"] else "completed"
             events.append(event(kind, row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["id"], row["title"], row["review_branch_url"] if kind == "reviewed" else None))
         for row in conn.execute(
-            "SELECT d.id, d.title, d.archived_at AS at, u.id AS uid, u.username, u.display_name, u.color "
+            "SELECT d.id, d.title, d.archived_at AS at, u.id AS uid, COALESCE(u.account_handle, u.username) AS username, u.display_name, u.color "
             "FROM dopes d JOIN users u ON u.id = d.archived_by "
             "WHERE d.archived_at IS NOT NULL AND d.saved_at IS NULL "
             "ORDER BY d.archived_at DESC LIMIT ?",
@@ -2091,7 +2085,7 @@ def diagnostics(
             events.append(event("archived", row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["id"], row["title"]))
         for row in conn.execute(
             "SELECT h.dope_id, h.assigned_at, h.unassigned_at, h.unassign_reason, d.title, "
-            "u.id AS uid, u.username, u.display_name, u.color "
+            "u.id AS uid, COALESCE(u.account_handle, u.username) AS username, u.display_name, u.color "
             "FROM assignment_history h JOIN dopes d ON d.id = h.dope_id JOIN users u ON u.id = h.user_id "
             "WHERE d.saved_at IS NULL "
             "ORDER BY h.assigned_at DESC LIMIT ?",
@@ -2104,7 +2098,7 @@ def diagnostics(
             if row["unassigned_at"] and row["unassign_reason"]:
                 events.append(event("unassigned", row["unassigned_at"], actor, row["dope_id"], row["title"], row["unassign_reason"]))
         for row in conn.execute(
-            "SELECT c.dope_id, c.body, c.created_at AS at, d.title, u.id AS uid, u.username, u.display_name, u.color "
+            "SELECT c.dope_id, c.body, c.created_at AS at, d.title, u.id AS uid, COALESCE(u.account_handle, u.username) AS username, u.display_name, u.color "
             "FROM comments c JOIN dopes d ON d.id = c.dope_id JOIN users u ON u.id = c.user_id "
             "WHERE d.saved_at IS NULL "
             "ORDER BY c.created_at DESC LIMIT ?",
@@ -2113,7 +2107,7 @@ def diagnostics(
             snippet = row["body"] if len(row["body"]) <= 120 else row["body"][:117] + "..."
             events.append(event("commented", row["at"], {"id": row["uid"], "username": row["username"], "display_name": row["display_name"], "color": row["color"]}, row["dope_id"], row["title"], snippet))
         for row in conn.execute(
-            "SELECT v.dope_id, v.edited_at AS at, d.title, u.id AS uid, u.username, u.display_name, u.color "
+            "SELECT v.dope_id, v.edited_at AS at, d.title, u.id AS uid, COALESCE(u.account_handle, u.username) AS username, u.display_name, u.color "
             "FROM dope_versions v JOIN dopes d ON d.id = v.dope_id JOIN users u ON u.id = v.edited_by "
             "WHERE v.version_number > 1 AND d.saved_at IS NULL ORDER BY v.edited_at DESC LIMIT ?",
             (limit,),
@@ -2133,12 +2127,45 @@ def diagnostics(
 @app.post("/api/dopes/{dope_id}/comments/read")
 def read_comments(
     dope_id: int,
-    user_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
-    authorization: str | None = Header(default=None),
+    member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
-    user = current_user(user_cookie, authorization)
+    user = member.user
     read_at = now_iso_precise()
-    with db() as conn:
+    with db(member.path, write=True) as conn:
         require_dope(conn, dope_id)
         mark_comments_read(conn, dope_id, user["id"], read_at)
     return {"ok": True, "last_read_at": read_at}
+
+@app.get("/api/workspace", response_model=views.Workspace)
+def workspace(status: str = "active", days: int = 7, member: BoardMember = Depends(board_member)):
+    """Load a board, viewer, categories and current list with one membership check."""
+    return {"board": member.board, "viewer": me(member), "categories": list_categories(member),
+            "dopes": list_dopes(status, member), "progress": progress_stats(days, member) if status == "active" else []}
+
+
+# Advertise the same authentication accepted by the normal routes to interface generators.
+def interface_schema():
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+    schema = get_openapi(title=app.title, version=app.version, description=app.description, routes=app.routes)
+    schemes = schema.setdefault("components", {}).setdefault("securitySchemes", {})
+    schemes["SiliconAccess"] = {"type": "http", "scheme": "bearer", "description": "An Accounts access token issued to dope."}
+    schemes["BoardKey"] = {"type": "http", "scheme": "bearer", "description": "A session-bound key for one board."}
+    schemes["BrowserSession"] = {"type": "apiKey", "in": "cookie", "name": accounts.COOKIE}
+    for path, methods in schema["paths"].items():
+        if not path.startswith("/api/") or path.startswith("/api/auth/"):
+            continue
+        account_only = path.startswith(("/api/people", "/api/contacts", "/api/invitations")) or "/invitations" in path
+        for method, operation in methods.items():
+            browser_only = path.startswith("/api/me/keys")
+            auth = [] if browser_only else [{"SiliconAccess": []}]
+            if not browser_only and not account_only and not (path == "/api/boards" and method == "post"):
+                auth.append({"BoardKey": []})
+            operation["security"] = auth + [{"BrowserSession": []}]
+            operation["parameters"] = [p for p in operation.get("parameters", []) if p.get("name", "").lower() != "authorization"]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = interface_schema

@@ -1,46 +1,17 @@
 from __future__ import annotations
 
-import importlib
-
 from fastapi.testclient import TestClient
 
-
-def load_main(tmp_path, monkeypatch):
-    monkeypatch.setenv("DOPE_DB_PATH", str(tmp_path / "dope.db"))
-    import app.main as main
-
-    return importlib.reload(main)
-
-
-def signup_and_login(client):
-    client.post(
-        "/api/auth/signup",
-        json={"username": "shubham", "password": "password", "display_name": "Shubham"},
-    )
-    login = client.post("/api/auth/login", json={"username": "shubham", "password": "password"})
-    assert login.status_code == 200
-
-
-def signup(client, username, display_name):
-    response = client.post(
-        "/api/auth/signup",
-        json={"username": username, "password": "password", "display_name": display_name},
-    )
-    assert response.status_code == 200
-
-
-def login(client, username):
-    response = client.post("/api/auth/login", json={"username": username, "password": "password"})
-    assert response.status_code == 200
+from silicon import load_main, login
 
 
 def test_completed_dope_can_be_marked_not_completed(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        signup(client, "shubham", "Shubham")
-        signup(client, "saket", "Saket")
-        signup(client, "brainspoof", "Brainspoof")
+        login(client, "shubham", "Shubham")
+        login(client, "saket", "Saket")
+        login(client, "brainspoof", "Brainspoof")
         login(client, "shubham")
         created = client.post(
             "/api/dopes",
@@ -80,12 +51,12 @@ def test_completed_dope_can_be_marked_not_completed(tmp_path, monkeypatch):
         assert dope_id not in completed_ids
 
 
-def test_saket_can_complete_a_dope_for_another_user(tmp_path, monkeypatch):
+def test_board_manager_can_credit_a_dope_to_another_user(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        signup(client, "shubham", "Shubham")
-        signup(client, "saket", "Saket")
+        login(client, "shubham", "Shubham")
+        login(client, "saket", "Saket")
         login(client, "shubham")
         created = client.post(
             "/api/dopes",
@@ -115,7 +86,7 @@ def test_saket_can_complete_a_dope_for_another_user(tmp_path, monkeypatch):
             },
         )
         assert completed.status_code == 200
-        assert completed.json()["completed_by"]["username"] == "shubham"
+        assert completed.json()["completed_by"]["username"] == "c:shubham"
 
         progress = client.get("/api/stats/progress?days=7").json()
         today = next(day for day in progress if day["date"] == main.current_dope_day().isoformat())
@@ -127,8 +98,7 @@ def test_dope_edit_can_update_time(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        signup(client, "shubham", "Shubham")
-        login(client, "shubham")
+        login(client, "shubham", "Shubham")
         created = client.post(
             "/api/dopes",
             json={
@@ -169,8 +139,8 @@ def test_dope_can_be_sent_for_review_and_approved(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        signup(client, "shubham", "Shubham")
-        signup(client, "saket", "Saket")
+        login(client, "shubham", "Shubham")
+        login(client, "saket", "Saket")
         login(client, "shubham")
         created = client.post(
             "/api/dopes",
@@ -232,9 +202,9 @@ def test_rejected_review_reopens_original_dope(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        signup(client, "shubham", "Shubham")
-        signup(client, "saket", "Saket")
-        signup(client, "brainspoof", "Brainspoof")
+        login(client, "shubham", "Shubham")
+        login(client, "saket", "Saket")
+        login(client, "brainspoof", "Brainspoof")
         login(client, "shubham")
         ordinary = client.post(
             "/api/dopes",

@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-import importlib
+from app import storage
 
 
 def test_db_context_manager_closes_connection(tmp_path, monkeypatch):
-    monkeypatch.setenv("DOPE_DB_PATH", str(tmp_path / "dope.db"))
-    import app.main as main
-
-    main = importlib.reload(main)
-
     class FakeConnection:
         row_factory = None
 
@@ -29,9 +24,9 @@ def test_db_context_manager_closes_connection(tmp_path, monkeypatch):
             self.closed = True
 
     fake = FakeConnection()
-    monkeypatch.setattr(main.sqlite3, "connect", lambda path: fake)
+    monkeypatch.setattr(storage.sqlite3, "connect", lambda path, **kwargs: fake)
 
-    with main.db() as conn:
+    with storage.db(tmp_path / "dope.db") as conn:
         assert conn is fake
         assert fake.closed is False
 

@@ -1,24 +1,8 @@
 from __future__ import annotations
 
-import importlib
-
 from fastapi.testclient import TestClient
 
-
-def load_main(tmp_path, monkeypatch):
-    monkeypatch.setenv("DOPE_DB_PATH", str(tmp_path / "dope.db"))
-    import app.main as main
-
-    return importlib.reload(main)
-
-
-def signup_and_login(client, username, display_name):
-    client.post(
-        "/api/auth/signup",
-        json={"username": username, "password": "password", "display_name": display_name},
-    )
-    login = client.post("/api/auth/login", json={"username": username, "password": "password"})
-    assert login.status_code == 200
+from silicon import load_main, login
 
 
 def create_dope(client, title, time_text="1hr", dependency_ids=None):
@@ -39,8 +23,8 @@ def test_diagnostics_totals_per_person_and_activity(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        signup_and_login(client, "shubham", "Shubham")
-        signup_and_login(client, "saket", "Saket")
+        login(client, "shubham", "Shubham")
+        login(client, "saket", "Saket")
 
         # saket creates three dopes: one gets completed, one blocks on another
         done_id = create_dope(client, "Ship it", "2hr")
@@ -69,7 +53,7 @@ def test_diagnostics_totals_per_person_and_activity(tmp_path, monkeypatch):
         assert t["in_progress_minutes"] == 30
         assert t["ready"] == 0
 
-        saket = next(p for p in d["per_person"] if p["user"]["username"] == "saket")
+        saket = next(p for p in d["per_person"] if p["user"]["username"] == "c:saket")
         assert saket["completed_count"] == 1
         assert saket["completed_minutes"] == 120
         assert saket["completed_7d_count"] == 1
@@ -79,7 +63,7 @@ def test_diagnostics_totals_per_person_and_activity(tmp_path, monkeypatch):
         assert saket["comments_count"] == 1
         assert saket["online"] is True
 
-        shubham = next(p for p in d["per_person"] if p["user"]["username"] == "shubham")
+        shubham = next(p for p in d["per_person"] if p["user"]["username"] == "c:shubham")
         assert shubham["completed_count"] == 0
 
         # newest first, all event types present
@@ -89,7 +73,7 @@ def test_diagnostics_totals_per_person_and_activity(tmp_path, monkeypatch):
         assert {"created", "assigned", "completed", "commented"} <= kinds
         completed_event = next(e for e in d["activity"] if e["type"] == "completed")
         assert completed_event["dope_title"] == "Ship it"
-        assert completed_event["user"]["username"] == "saket"
+        assert completed_event["user"]["username"] == "c:saket"
 
         uncategorized = d["remaining_by_category"][0]
         assert uncategorized["category"] is None
@@ -101,7 +85,7 @@ def test_diagnostics_unassign_reason_in_activity(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        signup_and_login(client, "saket", "Saket")
+        login(client, "saket", "Saket")
         dope_id = create_dope(client, "Flaky one")
         client.post(f"/api/dopes/{dope_id}/assign")
         client.post(f"/api/dopes/{dope_id}/unassign", json={"reason": "blocked on infra"})
@@ -124,7 +108,7 @@ def test_diagnostics_over_api_key_and_limit(tmp_path, monkeypatch):
     main = load_main(tmp_path, monkeypatch)
 
     with TestClient(main.app) as client:
-        signup_and_login(client, "saket", "Saket")
+        login(client, "saket", "Saket")
         for i in range(5):
             create_dope(client, f"Dope {i}")
         key = client.post("/api/me/keys", json={"name": "Agent"}).json()["key"]

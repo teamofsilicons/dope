@@ -1,13 +1,22 @@
 [Unit]
-Description=Dope FastAPI app
-After=network.target
+Description=Silicon Dopes
+Wants=network-online.target
+After=network-online.target
 
 [Service]
-User=ubuntu
-Group=www-data
+User=dope
+Group=dope
 WorkingDirectory=/srv/dope
 EnvironmentFile=/etc/dope.env
-ExecStart=/srv/dope/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/srv/dope/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
+StateDirectory=dope
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
 Restart=always
 RestartSec=3
 
