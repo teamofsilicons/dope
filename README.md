@@ -21,7 +21,7 @@ Open [Dopes locally](http://127.0.0.1:8000). Python 3.11 or later is supported.
 
 ## Configure Silicon sign-in
 
-The registered app ID is `dope`, owned by Saket Agents. Its hosted sign-in uses PKCE and works with the repository defaults. The production callback is `https://dope.teamofsilicons.com/api/auth/callback`. The loopback callbacks support `127.0.0.1`, `localhost` and `[::1]` at `/api/auth/callback`. The hosted chooser supports linked personal and work identities.
+The registered app ID is `dope`, owned by Saket Agents. Its hosted sign-in uses PKCE and works with the repository defaults. The production callback is `https://dopes.teamofsilicons.com/api/auth/callback`. The loopback callbacks support `127.0.0.1`, `localhost` and `[::1]` at `/api/auth/callback`. The hosted chooser supports linked personal and work identities.
 
 | Environment variable | Purpose |
 | --- | --- |
@@ -29,7 +29,7 @@ The registered app ID is `dope`, owned by Saket Agents. Its hosted sign-in uses 
 | `DOPE_ACCOUNTS_APP_SECRET` | Server-only app secret for Interface token introspection, recipient lookup and Contacts proofs. Hosted PKCE alone can run as a public client. |
 | `DOPE_REGISTRATION_FILE` | Alternative to the secret environment variable. Read `app_secret` from a private registration JSON file at this path. |
 | `DOPE_CONTACTS_URL` | Contacts origin. Defaults to `https://contacts.teamofsilicons.com`. |
-| `DOPE_PUBLIC_URL` | Public origin used in the callback and for cookie requests. Defaults to the incoming origin on loopback and `https://dope.teamofsilicons.com` elsewhere. |
+| `DOPE_PUBLIC_URL` | Public origin used in the callback and for cookie requests. Defaults to the incoming origin on loopback and `https://dopes.teamofsilicons.com` elsewhere. |
 | `DOPE_ACCOUNTS_URL` | Accounts origin. Defaults to `https://accounts.teamofsilicons.com`. |
 | `DOPE_ORGANIZATIONS_URL` | Organizations origin. Defaults to `https://organizations.teamofsilicons.com`. |
 | `DOPE_DB_PATH` | Base database path, default `./dope.db` in the repository. Sessions and board databases live in the adjacent `<path>.boards/` directory. Keep this directory private and include it in backups. |
@@ -56,4 +56,8 @@ The [API guide](docs/interface-api.md) covers sign-in, board permissions, reques
 
 Run `python -m pytest -q` with pytest installed. The browser workflow uses local test providers and checks two teammates on desktop and mobile. Install Playwright and Chromium, then run `python tests/browser_boards.py`. Set `CHROMIUM_PATH` to use an existing Chrome executable.
 
-The systemd and nginx setup is in [deploy](deploy/). Set the production origin, registration and persistent database path in `/etc/dope.env` before shipping. The existing `deploy/ship.sh` pushes its target branch and restarts the production service.
+Production runs at [dopes.teamofsilicons.com](https://dopes.teamofsilicons.com) on the `silicon-dopes-prod` Lightsail instance in `us-east-1`. The Linux Nano plan has 512 MB of RAM, a 20 GB SSD and one static IPv4 address. Nginx terminates HTTPS and Certbot renews the certificate using the webroot at `/var/www/letsencrypt`. Systemd runs a single application worker as `dope`.
+
+The host keeps `DOPE_PUBLIC_URL`, `DOPE_REGISTRATION_FILE` and `DOPE_DB_PATH` in `/etc/dope.env`. The app registration is readable by the service group at `/etc/dope/registration.json`, and board data is in `/var/lib/dope/dope.db.boards/`.
+
+Run `./deploy/ship.sh` from the clean release branch. It uses the `silicon-deployment` AWS profile for temporary SSH credentials and verifies the host keys supplied by Lightsail. The instance firewall allows SSH from the deployment network and the Lightsail browser console. The server checks the requested Git revision and tests the API after restarting.

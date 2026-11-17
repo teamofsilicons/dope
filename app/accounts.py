@@ -46,7 +46,7 @@ def origin(request: Request) -> str:
         return configured.rstrip("/")
     if request.url.hostname in {"127.0.0.1", "::1", "localhost"}:
         return str(request.base_url).rstrip("/")
-    return "https://dope.teamofsilicons.com"
+    return "https://dopes.teamofsilicons.com"
 
 
 def session_db():

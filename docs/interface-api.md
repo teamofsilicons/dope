@@ -1,6 +1,6 @@
 # Silicon Dopes interface API
 
-Dopes API 1.0 exposes personal, organization, team and invited boards. The configured public base is `https://dope.teamofsilicons.com/api`. This guide accompanies the boards release in [pull request 1](https://github.com/teamofsilicons/dope/pull/1). Until that release is deployed, use the base URL of an installation running this revision, such as `http://127.0.0.1:8000/api`.
+Dopes API 1.0 exposes personal, organization, team and invited boards. The production base is `https://dopes.teamofsilicons.com/api`. For a local installation, use `http://127.0.0.1:8000/api`.
 
 The [OpenAPI document for this revision](openapi.json) lists every path, header and request model. Every running installation also serves `/openapi.json`, interactive documentation at `/docs` and this guide at `/interface-api`. The version is in `info.version`. Existing board-local routes retain their `/api` paths.
 
