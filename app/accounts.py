@@ -1,22 +1,29 @@
 """Hosted Silicon Accounts sign-in and live Organizations board discovery."""
 from __future__ import annotations
 
+import atexit
 import base64
 import hashlib
 import os
+import json
+from pathlib import Path
 import secrets
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote, urlencode
 
 import httpx
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 
 from .storage import db, storage_dir
+from .catalog import Board, available_boards, catalog, remember_profile
 
+http = httpx.Client(timeout=8, follow_redirects=False)
+atexit.register(http.close)
 router = APIRouter()
 COOKIE = "dope_session"
 FLOW_COOKIE = "dope_signin"
@@ -76,7 +83,7 @@ def digest(value: str) -> str:
 
 def upstream(method: str, url: str, **options: Any) -> dict:
     try:
-        response = httpx.request(method, url, follow_redirects=False, timeout=8, **options)
+        response = http.request(method, url, **options)
         body = response.json()
     except (httpx.HTTPError, ValueError):
         raise HTTPException(503, "Silicon Accounts or Organizations is unavailable. Try again.") from None
@@ -87,8 +94,26 @@ def upstream(method: str, url: str, **options: Any) -> dict:
     return body
 
 
+def app_secret():
+    value = os.getenv("DOPE_ACCOUNTS_APP_SECRET")
+    path = os.getenv("DOPE_REGISTRATION_FILE")
+    if not value and path:
+        try:
+            value = json.loads(Path(path).read_text())["app_secret"]
+        except (OSError, ValueError, KeyError):
+            raise HTTPException(503, "The Dopes server registration is unavailable.") from None
+    return value
+
+
+def app_credentials():
+    secret = app_secret()
+    if not secret:
+        raise HTTPException(503, "Configure the Dopes server's Accounts app credentials.")
+    return app_id(), secret
+
+
 def token_request(fields: dict, operation: str) -> dict:
-    secret = os.getenv("DOPE_ACCOUNTS_APP_SECRET")
+    secret = app_secret()
     auth = (app_id(), secret) if secret else None
     if not secret:
         fields = {**fields, "client_id": app_id()}
@@ -101,6 +126,7 @@ class Account:
     uuid: str
     handle: str
     display_name: str
+    pfp_url: str | None = None
 
 
 def account_from(data: dict) -> Account:
@@ -108,7 +134,7 @@ def account_from(data: dict) -> Account:
     if (not isinstance(uuid, str) or not uuid or data.get("membership_id") != f"{app_id()}:{uuid}"
             or data.get("sub", uuid) != uuid or not isinstance(data.get("id"), str) or not data["id"]):
         raise HTTPException(401, "Use a Silicon Accounts session issued to Dopes.")
-    return Account(uuid, data["id"], data.get("display_name") or data["id"])
+    return Account(uuid, data["id"], data.get("display_name") or data["id"], data.get("pfp_url"))
 
 
 def token_values(tokens: dict) -> tuple[str, str, int]:
@@ -173,6 +199,8 @@ def callback(request: Request, state: str = "", code: str = "", error: str = "")
         conn.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                      (digest(cookie), account.uuid, account.handle, account.display_name,
                       *values, secrets.token_urlsafe(32), int(time.time()) + SESSION_AGE))
+    with catalog(write=True) as conn:
+        remember_profile(conn, {"uuid": account.uuid, "id": account.handle, "display_name": account.display_name, "pfp_url": account.pfp_url})
     response.set_cookie(COOKIE, cookie, max_age=SESSION_AGE, httponly=True, samesite="lax",
                         secure=flow["redirect_uri"].startswith("https://"))
     return response
@@ -186,7 +214,7 @@ def logout(request: Request, response: Response) -> dict:
         conn.execute("DELETE FROM sessions WHERE session_hash=?", (session_hash,))
     response.delete_cookie(COOKIE)
     if session:
-        secret = os.getenv("DOPE_ACCOUNTS_APP_SECRET")
+        secret = app_secret()
         fields = {"token": session["refresh_token"]}
         if not secret:
             fields["client_id"] = app_id()
@@ -234,19 +262,12 @@ def current_session(key: str) -> sqlite3.Row:
 
 
 @dataclass(frozen=True)
-class Board:
-    id: str
-    name: str
-    kind: str
-    organization: str | None
-    can_manage: bool
-
-
-@dataclass(frozen=True)
 class Access:
     account: Account
     boards: list[Board]
     browser_session: str | None = None
+    token: str = field(default="", repr=False)
+    board_key: bool = False
 
 
 def boards_for(account: Account, token: str) -> list[Board]:
@@ -292,9 +313,15 @@ def access(request: Request, authorization: str | None = Header(default=None)) -
             session = current_session(key["session_hash"])
             key_board = key["board_id"]
         else:
+            live = upstream("POST", accounts_url() + "/v1/oauth/introspect", auth=app_credentials(), data={"token": token})
+            if (live.get("active") is not True or live.get("token_type") != "access_token"
+                    or live.get("client_id") != app_id() or live.get("aud") != app_id()):
+                raise HTTPException(401, "Use a live access token issued to Dopes.")
             info = upstream("GET", accounts_url() + "/v1/userinfo", headers={"Authorization": authorization})
             account = account_from(info)
-            return Access(account, boards_for(account, token))
+            if account.uuid != live.get("sub"):
+                raise HTTPException(401, "Accounts could not verify this identity.")
+            return Access(account, available_boards(account.uuid, boards_for(account, token)), token=token)
     else:
         cookie = request.cookies.get(COOKIE)
         if not cookie:
@@ -302,14 +329,27 @@ def access(request: Request, authorization: str | None = Header(default=None)) -
         browser_session = digest(cookie)
         session = current_session(browser_session)
     account = Account(session["account_uuid"], session["handle"], session["display_name"])
-    boards = boards_for(account, session["access_token"])
+    boards = available_boards(account.uuid, boards_for(account, session["access_token"]))
     if key_board:
         boards = [board for board in boards if board.id == key_board]
         if not boards:
             raise HTTPException(403, "You no longer have access to this board.")
-    return Access(account, boards, browser_session)
+    return Access(account, boards, browser_session, session["access_token"], key_board is not None)
 
 
-@router.get("/api/boards")
+def account_access(context: Access = Depends(access), expected: str | None = Header(None, alias="X-Dope-Account")) -> Access:
+    if context.board_key:
+        raise HTTPException(403, "This operation needs account access.")
+    if expected is not None and expected != context.account.uuid:
+        raise HTTPException(409, "The signed-in account changed.")
+    return context
+
+
+class BoardDirectory(BaseModel):
+    account: Account
+    boards: list[Board]
+
+
+@router.get("/api/boards", response_model=BoardDirectory)
 def list_boards(context: Access = Depends(access)) -> dict:
     return {"account": context.account, "boards": context.boards}

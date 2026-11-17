@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import os
 import re
 import secrets
@@ -13,13 +14,15 @@ from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import markdown
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, HTMLResponse
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import accounts
+from . import accounts, files, people, sharing, views
+from .catalog import init_catalog
 from .storage import board_path, db
 
 
@@ -33,21 +36,35 @@ COMBINED_DOPE_DAYS = {date(2026, 7, 20): date(2026, 7, 21)}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     accounts.init_sessions()
+    init_catalog()
     yield
 
 
-app = FastAPI(title="Silicon Dopes", lifespan=lifespan)
+app = FastAPI(title="Silicon Dopes", version="1.0", lifespan=lifespan,
+              description="Boards, dopes, invitations, contacts and files. See the [interface guide](/interface-api).")
 app.include_router(accounts.router)
+app.include_router(sharing.router)
+app.include_router(people.router)
+app.include_router(files.router)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
 @app.middleware("http")
 async def private_responses(request: Request, call_next):
     origin = request.headers.get("origin")
-    if (request.method not in {"HEAD", "GET", "OPTIONS"} and origin
-            and origin != accounts.origin(request)):
-        return JSONResponse({"detail": "Use the Dopes site to make changes."}, status_code=403)
+    foreign = origin and origin != accounts.origin(request)
+    bearer = request.headers.get("authorization", "").lower().startswith("bearer ")
+    external_api = request.url.path.startswith("/api/") and not request.url.path.startswith("/api/auth/")
+    cors = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Dope-Board, X-Dope-Account, Idempotency-Key",
+            "Access-Control-Expose-Headers": "Content-Disposition, Retry-After", "Access-Control-Max-Age": "600"}
+    if foreign and external_api and request.method == "OPTIONS":
+        return Response(status_code=204, headers=cors)
+    if foreign and request.method not in {"HEAD", "GET", "OPTIONS"} and not (bearer and external_api):
+        return JSONResponse({"detail": "Cross-origin writes require an app access token."}, status_code=403)
     response = await call_next(request)
+    if foreign and bearer and external_api:
+        response.headers.update(cors)
     if not request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -103,6 +120,10 @@ def init_db(path: Path) -> None:
               created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS create_receipts (
+              user_id INTEGER NOT NULL REFERENCES users(id), operation TEXT NOT NULL, kind TEXT NOT NULL,
+              fingerprint TEXT NOT NULL, item_id INTEGER NOT NULL, PRIMARY KEY (user_id, operation)
+            );
             CREATE TABLE IF NOT EXISTS dopes (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               title TEXT NOT NULL,
@@ -957,7 +978,21 @@ def index() -> FileResponse:
     return FileResponse(ROOT / "templates" / "index.html")
 
 
-@app.get("/api/me")
+@app.get("/interface-api", response_class=HTMLResponse, include_in_schema=False)
+@lru_cache(maxsize=1)
+def interface_guide():
+    guide = (ROOT.parent / "docs/interface-api.md").read_text()
+    body = markdown.markdown(guide.replace("](openapi.json)", "](/openapi.json)"), extensions=["fenced_code", "tables"])
+    return HTMLResponse('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                        '<title>Silicon Dopes interface API</title><link rel="stylesheet" href="/static/vendor/fonts.css">'
+                        '<style>body{max-width:84ch;margin:2rem auto;padding:0 1rem;background:#ede8e0;color:#1a1a1a;'
+                        'font:1rem/1.55 Inter,sans-serif}pre,table{display:block;overflow:auto}code{overflow-wrap:anywhere}'
+                        'th,td{padding:.4rem;text-align:left;border-bottom:1px solid #d4cfc7}a{color:#244f65}</style>'
+                        '<nav><a href="/docs">Interactive reference</a> · <a href="/openapi.json">OpenAPI JSON</a></nav><main>'
+                        + body + '</main></html>')
+
+
+@app.get("/api/me", response_model=views.BoardUser)
 def me(
     member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
@@ -1019,7 +1054,7 @@ def revoke_api_key(key_id: int, member: BoardMember = Depends(browser_member)) -
     return {"ok": True}
 
 
-@app.get("/api/categories")
+@app.get("/api/categories", response_model=list[views.Category])
 def list_categories(
     member: BoardMember = Depends(board_member),
 ) -> list[dict[str, Any]]:
@@ -1114,7 +1149,7 @@ def board_overview(member: BoardMember = Depends(board_member)) -> dict:
     return {"board": member.board, "viewer_id": member.user["id"], "dopes": items}
 
 
-@app.get("/api/dopes")
+@app.get("/api/dopes", response_model=list[views.Dope])
 def list_dopes(
     status: str = "active",
     member: BoardMember = Depends(board_member),
@@ -1344,15 +1379,27 @@ def progress_stats(
     return payload
 
 
-@app.post("/api/dopes")
+def previous_create(conn, user_id, key, kind, data):
+    fingerprint = hashlib.sha256(data.model_dump_json().encode()).hexdigest()
+    row = conn.execute("SELECT * FROM create_receipts WHERE user_id=? AND operation=?", (user_id, key)).fetchone()
+    if row and (row["kind"] != kind or row["fingerprint"] != fingerprint):
+        raise HTTPException(409, "This operation key was already used for different content.")
+    return (row["item_id"] if row else None), fingerprint
+
+
+@app.post("/api/dopes", response_model=views.Dope)
 def create_dope(
     data: DopeIn,
+    key: str | None = sharing.OperationKey,
     member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
     user = member.user
     title, body = data.content()
     minutes = parse_time_to_minutes(data.time_text) if data.time_text else 0
     with db(member.path, write=True) as conn:
+        prior, fingerprint = previous_create(conn, user["id"], key, "dope", data)
+        if prior:
+            return dope_payload(require_dope(conn, prior), conn, user["id"])
         category_id = validate_category_id(conn, data.category_id)
         cur = conn.execute(
             """
@@ -1362,13 +1409,15 @@ def create_dope(
             (title, body, minutes, user["id"], now_iso(), category_id),
         )
         dope_id = int(cur.lastrowid)
+        if key:
+            conn.execute("INSERT INTO create_receipts VALUES (?,?,?,?,?)", (user["id"], key, "dope", fingerprint, dope_id))
         set_dope_dependencies(conn, dope_id, data.dependency_ids)
         add_dope_version(conn, dope_id, title, body, user["id"], now_iso())
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (cur.lastrowid,)).fetchone()
         return dope_payload(row, conn, user["id"])
 
 
-@app.put("/api/dopes/{dope_id}")
+@app.put("/api/dopes/{dope_id}", response_model=views.Dope)
 def edit_dope(
     dope_id: int,
     data: DopeIn,
@@ -1396,7 +1445,7 @@ def edit_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/assign")
+@app.post("/api/dopes/{dope_id}/assign", response_model=views.Dope)
 def assign_dope(
     dope_id: int,
     member: BoardMember = Depends(board_member),
@@ -1424,7 +1473,7 @@ def assign_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/unassign")
+@app.post("/api/dopes/{dope_id}/unassign", response_model=views.Dope)
 def unassign_dope(
     dope_id: int,
     data: UnassignIn = UnassignIn(),
@@ -1454,11 +1503,12 @@ def unassign_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/complete")
+@app.post("/api/dopes/{dope_id}/complete", response_model=views.Dope)
 def complete_dope(
     dope_id: int,
     data: CompleteIn = CompleteIn(),
     member: BoardMember = Depends(board_member),
+    context: accounts.Access = Depends(accounts.access),
 ) -> dict[str, Any]:
     user = member.user
     completion_text = (data.completion_text or data.completion_description or data.description).strip()
@@ -1467,6 +1517,10 @@ def complete_dope(
     for link in raw_links:
         clean_links.append(validate_http_url(link, "Commit links"))
     completed_at = now_iso_precise()
+    eligible = None
+    if data.completed_for_user_id is not None:
+        require_manager(member)
+        eligible = people.participants(context, member.board)
     with db(member.path, write=True) as conn:
         row = conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone()
         if not row or row["archived_at"] or row["saved_at"]:
@@ -1479,12 +1533,11 @@ def complete_dope(
             raise HTTPException(status_code=400, detail="Dependencies Undoped")
         completed_by_id = user["id"]
         if data.completed_for_user_id is not None:
-            require_manager(member)
             completion_user = conn.execute(
-                "SELECT id FROM users WHERE id = ?",
+                "SELECT id,account_uuid FROM users WHERE id = ?",
                 (data.completed_for_user_id,),
             ).fetchone()
-            if not completion_user:
+            if not completion_user or completion_user["account_uuid"] not in eligible:
                 raise HTTPException(status_code=400, detail="Completion user not found")
             completed_by_id = completion_user["id"]
         conn.execute(
@@ -1509,7 +1562,7 @@ def complete_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/review")
+@app.post("/api/dopes/{dope_id}/review", response_model=views.Dope)
 def send_dope_for_review(
     dope_id: int,
     data: ReviewRequestIn,
@@ -1560,7 +1613,7 @@ def send_dope_for_review(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/review/approve")
+@app.post("/api/dopes/{dope_id}/review/approve", response_model=views.Dope)
 def approve_dope_review(
     dope_id: int,
     member: BoardMember = Depends(board_member),
@@ -1579,7 +1632,7 @@ def approve_dope_review(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/review/reject")
+@app.post("/api/dopes/{dope_id}/review/reject", response_model=views.Dope)
 def reject_dope_review(
     dope_id: int,
     data: ReviewRejectIn,
@@ -1631,7 +1684,7 @@ def reject_dope_review(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/uncomplete")
+@app.post("/api/dopes/{dope_id}/uncomplete", response_model=views.Dope)
 def uncomplete_dope(
     dope_id: int,
     member: BoardMember = Depends(board_member),
@@ -1687,7 +1740,7 @@ def uncomplete_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.patch("/api/dopes/{dope_id}/category")
+@app.patch("/api/dopes/{dope_id}/category", response_model=views.Dope)
 def set_dope_category(
     dope_id: int,
     data: DopeCategoryIn,
@@ -1703,7 +1756,7 @@ def set_dope_category(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/save-for-later")
+@app.post("/api/dopes/{dope_id}/save-for-later", response_model=views.Dope)
 def save_dope_for_later(
     dope_id: int,
     member: BoardMember = Depends(board_member),
@@ -1724,7 +1777,7 @@ def save_dope_for_later(
         )
 
 
-@app.post("/api/dopes/{dope_id}/move-to-active")
+@app.post("/api/dopes/{dope_id}/move-to-active", response_model=views.Dope)
 def move_saved_dope_to_active(
     dope_id: int,
     member: BoardMember = Depends(board_member),
@@ -1745,7 +1798,7 @@ def move_saved_dope_to_active(
         )
 
 
-@app.post("/api/dopes/{dope_id}/archive")
+@app.post("/api/dopes/{dope_id}/archive", response_model=views.Dope)
 def archive_dope(
     dope_id: int,
     member: BoardMember = Depends(board_member),
@@ -1762,7 +1815,7 @@ def archive_dope(
         return dope_payload(conn.execute("SELECT * FROM dopes WHERE id = ?", (dope_id,)).fetchone(), conn, user["id"])
 
 
-@app.post("/api/dopes/{dope_id}/restore")
+@app.post("/api/dopes/{dope_id}/restore", response_model=views.Dope)
 def restore_dope(
     dope_id: int,
     member: BoardMember = Depends(board_member),
@@ -1799,7 +1852,7 @@ def require_dope(conn: sqlite3.Connection, dope_id: int) -> sqlite3.Row:
     return row
 
 
-@app.get("/api/dopes/{dope_id}")
+@app.get("/api/dopes/{dope_id}", response_model=views.Dope)
 def get_dope(dope_id: int, member: BoardMember = Depends(board_member)) -> dict:
     with db(member.path) as conn:
         return dope_payload(require_dope(conn, dope_id), conn, member.user["id"])
@@ -1823,6 +1876,7 @@ def list_comments(
 def create_comment(
     dope_id: int,
     data: CommentIn,
+    key: str | None = sharing.OperationKey,
     member: BoardMember = Depends(board_member),
 ) -> dict[str, Any]:
     user = member.user
@@ -1832,11 +1886,20 @@ def create_comment(
     created_at = now_iso_precise()
     with db(member.path, write=True) as conn:
         require_dope(conn, dope_id)
+        kind = f"comments/{dope_id}"
+        prior, fingerprint = previous_create(conn, user["id"], key, kind, data)
+        if prior:
+            row = conn.execute("SELECT * FROM comments WHERE id=?", (prior,)).fetchone()
+            if not row:
+                raise HTTPException(409, "The original comment has since been removed.")
+            return comment_payload(row, conn)
         cur = conn.execute(
             "INSERT INTO comments (dope_id, user_id, body, created_at) VALUES (?, ?, ?, ?)",
             (dope_id, user["id"], body, created_at),
         )
         comment_id = int(cur.lastrowid)
+        if key:
+            conn.execute("INSERT INTO create_receipts VALUES (?,?,?,?,?)", (user["id"], key, kind, fingerprint, comment_id))
         mention_ids = extract_mention_user_ids(conn, body)
         conn.executemany(
             "INSERT OR IGNORE INTO comment_mentions (comment_id, user_id) VALUES (?, ?)",
@@ -2072,3 +2135,37 @@ def read_comments(
         require_dope(conn, dope_id)
         mark_comments_read(conn, dope_id, user["id"], read_at)
     return {"ok": True, "last_read_at": read_at}
+
+@app.get("/api/workspace", response_model=views.Workspace)
+def workspace(status: str = "active", days: int = 7, member: BoardMember = Depends(board_member)):
+    """Load a board, viewer, categories and current list with one membership check."""
+    return {"board": member.board, "viewer": me(member), "categories": list_categories(member),
+            "dopes": list_dopes(status, member), "progress": progress_stats(days, member) if status == "active" else []}
+
+
+# Advertise the same authentication accepted by the normal routes to interface generators.
+def interface_schema():
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+    schema = get_openapi(title=app.title, version=app.version, description=app.description, routes=app.routes)
+    schemes = schema.setdefault("components", {}).setdefault("securitySchemes", {})
+    schemes["SiliconAccess"] = {"type": "http", "scheme": "bearer", "description": "An Accounts access token issued to dope."}
+    schemes["BoardKey"] = {"type": "http", "scheme": "bearer", "description": "A session-bound key for one board."}
+    schemes["BrowserSession"] = {"type": "apiKey", "in": "cookie", "name": accounts.COOKIE}
+    for path, methods in schema["paths"].items():
+        if not path.startswith("/api/") or path.startswith("/api/auth/"):
+            continue
+        account_only = path.startswith(("/api/people", "/api/contacts", "/api/invitations")) or "/invitations" in path
+        for method, operation in methods.items():
+            browser_only = path.startswith("/api/me/keys")
+            auth = [] if browser_only else [{"SiliconAccess": []}]
+            if not browser_only and not account_only and not (path == "/api/boards" and method == "post"):
+                auth.append({"BoardKey": []})
+            operation["security"] = auth + [{"BrowserSession": []}]
+            operation["parameters"] = [p for p in operation.get("parameters", []) if p.get("name", "").lower() != "authorization"]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = interface_schema

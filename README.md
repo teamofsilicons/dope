@@ -2,7 +2,11 @@
 
 Sign in with Silicon Accounts and select a personal or work identity. Work accounts see an organization board and a list for each team they belong to. Each identity also has a private personal board. Organizations owns team definitions, membership and app access.
 
-On a board, write a description and choose **Add dope**. Any member can take an available dope or mark it done. The assignee or a board administrator can release it. Select a dope to edit it or add a completion note. The **Done** tab records who finished the work and lets members reopen it.
+Use **New Dope** to write a description. Anyone on the board can take or complete work. **Doped** finishes it immediately. **Completion note…** adds an optional note or, for an administrator, credits another member. The original progress chart, rich cards, comments and mentions, dependencies, categories, saved work, review queue, history and diagnostics are available in each board.
+
+The **+** in the boards sidebar creates lists in a personal, organization or team scope the signed-in identity manages. Owners can invite guests to a private board. Recipients accept in **Invitations** and open the board under **Shared with me**. Organization and team boards follow live group membership. Review and board settings use the same administrator roles.
+
+**Contacts** connects the signed-in identity’s Silicon Contacts address book, including private names, photos and trust from 1 to 255. Recipient suggestions rank invitations sent twice as heavily as invitations received, then compare recency and trust. **Files** accepts attachments up to 10 MiB and filters files shared with the viewer by sender, saved contact and minimum trust.
 
 ## Run locally
 
@@ -22,7 +26,9 @@ The registered app ID is `dope`, owned by Saket Agents. Its hosted sign-in uses 
 | Environment variable | Purpose |
 | --- | --- |
 | `DOPE_ACCOUNTS_APP_ID` | Registered Accounts app ID. Defaults to `dope`. |
-| `DOPE_ACCOUNTS_APP_SECRET` | Server-side secret for a confidential client. Alternatively, enable `public_client` on the registration and use PKCE without a secret. |
+| `DOPE_ACCOUNTS_APP_SECRET` | Server-only app secret for Interface token introspection, recipient lookup and Contacts proofs. Hosted PKCE alone can run as a public client. |
+| `DOPE_REGISTRATION_FILE` | Alternative to the secret environment variable. Read `app_secret` from a private registration JSON file at this path. |
+| `DOPE_CONTACTS_URL` | Contacts origin. Defaults to `https://contacts.teamofsilicons.com`. |
 | `DOPE_PUBLIC_URL` | Public origin used in the callback and for cookie requests. Defaults to the incoming origin on loopback and `https://dope.teamofsilicons.com` elsewhere. |
 | `DOPE_ACCOUNTS_URL` | Accounts origin. Defaults to `https://accounts.teamofsilicons.com`. |
 | `DOPE_ORGANIZATIONS_URL` | Organizations origin. Defaults to `https://organizations.teamofsilicons.com`. |
@@ -42,24 +48,9 @@ python -m app.storage 'team:your-org/your-team-id'
 
 This copies the original SQLite database, including dopes, rich descriptions, comment threads, historical commit links and assignments. It refuses to overwrite an existing board. Original users remain credited in history. Silicon identities are matched by verified account UUID. Password sessions and API keys from the global board retire at cutover.
 
-## Board API
+## Interface API
 
-Use a browser session, a Dopes-scoped Accounts bearer token, or a board API key from `POST /api/me/keys`. Browser-issued keys are bound to their board and issuing session. Signing out of that session also ends its keys.
-
-| Request | Result |
-| --- | --- |
-| `GET /api/boards` | Selected account and permitted boards |
-| `GET /api/board` | Selected board, viewer ID and dope list |
-| `POST /api/dopes` | Create with `{"description":"Review onboarding copy"}` |
-| `POST /api/dopes/{id}/assign` | Take an available dope |
-| `POST /api/dopes/{id}/unassign` | Release your dope |
-| `POST /api/dopes/{id}/complete` | Mark done with an empty body or `{"description":"Reviewed with design"}` |
-| `POST /api/dopes/{id}/uncomplete` | Reopen a dope |
-| `PUT /api/dopes/{id}` | Edit its description |
-
-Send `X-Dope-Board` with the exact `id` from discovery. Dope IDs are local to that board. When the header is absent, the API uses the first available organization board or the personal board. The browser also sends `X-Dope-Account` with the selected account UUID to detect a session switched in another tab.
-
-The existing rich-dope, comments, categories, saved work, review, progress and diagnostics endpoints operate within the selected board. Review approvals and reset settings use the current board administrator role. See [the API schema](http://127.0.0.1:8000/docs) on a running local instance.
+The [API guide](docs/interface-api.md) covers sign-in, board permissions, requests and responses, file filters, recipient lookup, pagination and retries. The [OpenAPI document](docs/openapi.json) can be imported into interface tooling. A running server also hosts `/docs`, `/openapi.json` and `/interface-api`.
 
 ## Verify and deploy
 

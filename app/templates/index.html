@@ -3,58 +3,282 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f7f7f2">
-  <meta name="referrer" content="no-referrer">
-  <title>Silicon Dopes</title>
-  <link rel="icon" href="/static/si-logo-light.png">
-  <link rel="stylesheet" href="/static/app.css?v=boards1">
-  <script src="/static/app.js?v=boards1" defer></script>
+  <meta name="theme-color" content="#ede8e0">
+  <title>Dopes</title>
+  <link rel="icon" type="image/png" href="/static/si-logo-light.png?v=20260626-cats2">
+  <link rel="apple-touch-icon" href="/static/si-logo-light.png?v=20260626-cats2">
+  <link rel="stylesheet" href="/static/vendor/fonts.css">
+  <link rel="stylesheet" href="/static/vendor/icons.css">
+  <link rel="stylesheet" href="/static/app.css?v=boards2">
+  <link rel="stylesheet" href="/static/boards.css?v=boards2">
+  <script src="/static/vendor/fuse.min.js" defer></script>
+  <script src="/static/app.js?v=boards2" defer></script>
+  <script src="/static/boards.js?v=boards2" defer></script>
+  <script src="/static/sharing.js?v=boards2" defer></script>
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="/" aria-label="Silicon Dopes home"><img src="/static/si-logo-light.png" width="30" height="30" alt="">Silicon <strong>Dopes</strong></a>
-    <details id="account-menu" class="account-menu" hidden>
-      <summary><span class="avatar" id="initial"></span><span id="account-name"></span><span class="chevron" aria-hidden="true"></span></summary>
-      <div class="menu-pop"><span id="account-handle"></span><a href="/api/auth/login">Switch account</a><button id="logout">Sign out</button></div>
-    </details>
-  </header>
-  <main id="loading" class="centered" aria-live="polite">Loading boards…</main>
-  <main id="signin" class="centered" hidden>
-    <section class="signin-card">
-      <img src="/static/si-logo-light.png" width="48" height="48" alt="">
-      <h1>Silicon Dopes</h1>
-      <p>Your team’s dope lists, or a board of your own.</p>
-      <p id="signin-message" class="notice" role="status" hidden></p>
-      <a class="primary" href="/api/auth/login">Sign in with Silicon Accounts <span aria-hidden="true">↗</span></a>
+  <div id="toast" class="toast" hidden></div>
+  <div id="progress-tooltip" class="progress-tooltip" hidden></div>
+
+  <main id="loading-view" class="loading-shell">
+    <section class="loading-card" aria-live="polite" aria-busy="true">
+      <img class="mark" src="/static/si-logo-light.png" alt="" width="34" height="34">
+      <div>
+        <p class="kicker">Team of Silicons</p>
+        <h1>Dopes</h1>
+      </div>
+      <span class="loading-bar"><span></span></span>
     </section>
   </main>
-  <div id="workspace" class="workspace" hidden>
-    <aside class="sidebar" aria-label="Boards">
-      <h2>Boards</h2>
-      <nav id="boards" aria-label="Select a board"></nav>
-    </aside>
-    <main class="board-content">
-      <div class="mobile-boards"><label for="board-select">Board</label><select id="board-select"></select></div>
-      <p class="board-context" id="board-context"></p>
-      <h1 id="board-title"></h1>
-      <form id="composer" class="composer">
-        <label for="description" class="sr-only">Dope description</label>
-        <textarea id="description" rows="2" maxlength="20000" placeholder="What needs doing?" required></textarea>
-        <div class="compose-bottom"><span class="key-hint" id="shortcut"></span><button class="primary" type="submit" id="add"><span aria-hidden="true">＋</span> Add dope</button></div>
-      </form>
-      <div class="list-tools">
-        <div id="filters" class="filters" role="group" aria-label="Dope status"></div>
-        <label class="search"><span class="search-icon" aria-hidden="true"></span><span class="sr-only">Search dopes</span><input id="search" type="search" placeholder="Search dopes" autocomplete="off"></label>
+
+  <main id="auth-view" class="auth-shell" hidden>
+    <section class="auth-panel">
+      <p class="kicker">Team of Silicons</p>
+      <h1>Dopes</h1>
+      <p class="muted">Create, take, and finish dopes with your team.</p>
+      <p id="auth-notice" class="auth-notice" role="status" hidden></p>
+      <a class="signin" href="/api/auth/login">Sign in with Silicon Accounts</a>
+    </section>
+  </main>
+
+  <main id="app-view" hidden>
+    <div id="route-loading" class="route-loading" hidden>
+      <span class="loading-bar"><span></span></span>
+    </div>
+    <header class="site-head">
+      <a href="#active" class="site-logo"><img class="mark" src="/static/si-logo-light.png" alt="" width="28" height="28"><span>Dopes</span></a>
+      <nav class="nav-links">
+        <a href="#active" data-route="active">Active</a>
+        <a href="#saved" data-route="saved">Saved</a>
+        <a href="#review" data-route="review" id="review-nav" hidden>Review</a>
+        <a href="#completed" data-route="completed">Completed</a>
+        <a href="#archived" data-route="archived">Archived</a>
+      </nav>
+      <div class="user-chip">
+        <button id="diagnostics-open" title="Diagnostics"><i aria-hidden="true" class="ph ph-pulse"></i></button>
+        <button id="categories-open" title="Manage categories"><i aria-hidden="true" class="ph ph-tag"></i></button>
+        <button id="settings-open" title="Settings" aria-label="Settings" hidden><i aria-hidden="true" class="ph ph-gear"></i></button>
+        <button id="profile-open" class="profile-chip" title="Profile"><span id="user-color-dot"></span><span id="user-name"></span></button>
+        <button id="logout" title="Sign out"><i aria-hidden="true" class="ph ph-sign-out"></i></button>
       </div>
-      <p id="list-status" role="status"></p>
-      <ul id="dopes" class="dope-list" aria-label="Dopes"></ul>
-    </main>
-  </div>
-  <div id="notice" class="notification" role="status" hidden><span></span><button id="retry" type="button" hidden>Retry</button><button id="dismiss" aria-label="Dismiss message">×</button></div>
-  <dialog id="detail" aria-labelledby="detail-title">
-    <form method="dialog" class="dialog-close"><button aria-label="Close">×</button></form>
-    <div id="detail-body"></div>
+    </header>
+
+    <div class="workspace">
+      <aside class="boards-side" aria-label="Boards">
+        <div class="side-top"><h2>Boards</h2><button type="button" class="secondary" id="board-create" title="Create board" aria-label="Create board"><i aria-hidden="true" class="ph ph-plus"></i></button></div>
+        <nav id="boards-list" aria-label="Your boards"></nav>
+        <select id="mobile-board" aria-label="Board"></select>
+        <div class="side-tools">
+          <button id="board-invite" type="button"><i aria-hidden="true" class="ph ph-user-plus"></i>Invite</button>
+          <button id="board-inbox" type="button"><i aria-hidden="true" class="ph ph-envelope"></i>Invitations <span id="inbox-count"></span></button>
+          <button id="board-contacts" type="button"><i aria-hidden="true" class="ph ph-address-book"></i>Contacts</button>
+          <button id="board-files" type="button"><i aria-hidden="true" class="ph ph-files"></i>Files</button>
+        </div>
+      </aside>
+      <div class="board-main">
+    <section id="board-shell" class="page-shell">
+      <section id="progress-panel" class="progress-panel" hidden>
+        <div class="progress-top">
+          <h2>Progress</h2>
+          <div class="progress-range" role="group" aria-label="Progress range">
+            <button type="button" data-progress-days="7" class="active">7d</button>
+            <button type="button" data-progress-days="14">14d</button>
+            <button type="button" data-progress-days="30">30d</button>
+          </div>
+        </div>
+        <div id="progress-chart" class="progress-chart"></div>
+      </section>
+
+      <div class="title-row">
+        <div>
+          <h1 id="page-title">Dopes</h1>
+          <p id="page-subtitle" class="muted">Product work waiting to be amended.</p>
+        </div>
+        <button id="new-dope"><i aria-hidden="true" class="ph ph-plus"></i>New Dope</button>
+      </div>
+
+      <section class="toolbar">
+        <label class="search-box"><i aria-hidden="true" class="ph ph-magnifying-glass"></i><input id="search" name="dope_query" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Search"></label>
+        <button id="filter-open" class="secondary"><i aria-hidden="true" class="ph ph-sliders-horizontal"></i>Filter</button>
+      </section>
+
+      <section id="active-assigned-wrap">
+        <h2>Currently Active Dopes</h2>
+        <div id="active-assigned" class="dope-list compact"></div>
+      </section>
+
+      <section class="list-section">
+        <h2 id="list-heading">All Dopes</h2>
+        <div id="dope-list" class="dope-list"></div>
+        <p id="empty" class="empty" hidden>No dopes found.</p>
+      </section>
+    </section>
+
+    <section id="diagnostics-page" class="page-shell diag-shell" hidden>
+      <div class="title-row diag-title-row">
+        <div>
+          <p class="kicker">Team of Silicons</p>
+          <h1 class="compact-title">Diagnostics</h1>
+        </div>
+        <div class="diag-title-side">
+          <span id="diag-updated" class="diag-updated"></span>
+          <button id="diag-refresh" class="secondary" type="button"><i aria-hidden="true" class="ph ph-arrows-clockwise"></i>Refresh</button>
+        </div>
+      </div>
+      <div id="diagnostics-body"><p class="empty">Loading diagnostics…</p></div>
+    </section>
+      </div>
+    </div>
+  </main>
+
+  <dialog id="workspace-dialog" aria-labelledby="workspace-title">
+    <div class="modal small"><button type="button" id="workspace-close" class="icon-close" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button>
+      <h2 id="workspace-title"></h2><div id="workspace-body"></div>
+    </div>
   </dialog>
-  <noscript>Enable JavaScript to use Silicon Dopes.</noscript>
+
+  <dialog id="dope-dialog">
+    <form method="dialog" class="modal">
+      <button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button>
+      <h2 id="modal-title">New Dope</h2>
+      <div id="modal-body"></div>
+    </form>
+  </dialog>
+
+  <dialog id="filter-dialog">
+    <form method="dialog" class="modal small">
+      <button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button>
+      <h2>Filters</h2>
+      <div class="filter-group">
+        <span class="filter-label">Category</span>
+        <div id="filter-categories" class="category-filter-chips"></div>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Time to complete</span>
+        <div class="grid-two">
+          <label>Min time<input id="filter-min" name="dope_filter_min_time" autocomplete="off" placeholder="30min"></label>
+          <label>Max time<input id="filter-max" name="dope_filter_max_time" autocomplete="off" placeholder="5hr"></label>
+        </div>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Created date</span>
+        <div class="grid-two">
+          <label>From<input id="filter-created-from" type="date"></label>
+          <label>To<input id="filter-created-to" type="date"></label>
+        </div>
+      </div>
+      <label class="filter-check"><input id="filter-deps-doped" type="checkbox">All Dependencies Doped</label>
+      <div id="completed-filters">
+        <div class="filter-group">
+          <span class="filter-label">Completed</span>
+          <label>Completed by<input id="filter-completed-by" name="dope_filter_completed_by" autocomplete="off" placeholder="Name"></label>
+          <div class="grid-two">
+            <label>From<input id="filter-from" type="date"></label>
+            <label>To<input id="filter-to" type="date"></label>
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="filter-apply" value="default">Apply filters</button>
+        <button id="filter-reset" class="secondary" value="default">Reset filters</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="categories-dialog">
+    <form method="dialog" class="modal small categories-modal">
+      <button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button>
+      <h2>Categories</h2>
+      <p class="muted categories-intro">Group your dopes by category. Each category carries a color used across cards and filters.</p>
+      <div id="category-list" class="category-manage-list"></div>
+      <div class="category-create">
+        <span class="filter-label">New category</span>
+        <div class="category-create-row">
+          <input id="category-new-name" autocomplete="off" placeholder="Category name" maxlength="60">
+          <input id="category-new-color" type="color" aria-label="Category color" value="#2e6f8e">
+        </div>
+        <div class="color-presets" aria-label="Preset colors">
+          <button type="button" data-category-color="#2e6f8e" style="--swatch:#2e6f8e"></button>
+          <button type="button" data-category-color="#5a9a6b" style="--swatch:#5a9a6b"></button>
+          <button type="button" data-category-color="#c56f2d" style="--swatch:#c56f2d"></button>
+          <button type="button" data-category-color="#7a4d8e" style="--swatch:#7a4d8e"></button>
+          <button type="button" data-category-color="#b23a70" style="--swatch:#b23a70"></button>
+          <button type="button" data-category-color="#2f8f83" style="--swatch:#2f8f83"></button>
+          <button type="button" data-category-color="#4f68b1" style="--swatch:#4f68b1"></button>
+          <button type="button" data-category-color="#9a4d42" style="--swatch:#9a4d42"></button>
+          <button type="button" data-category-color="#ffbb00" style="--swatch:#ffbb00"></button>
+          <button type="button" data-category-color="#1a1a1a" style="--swatch:#1a1a1a"></button>
+        </div>
+        <button id="category-add" class="primary-wide" type="button" value="default"><i aria-hidden="true" class="ph ph-plus"></i>Add category</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog">
+    <form method="dialog" class="modal small settings-modal">
+      <button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button>
+      <p class="kicker">Board administration</p>
+      <h2>Settings</h2>
+      <section class="reset-countdown-card">
+        <span>Next dope-day reset in</span>
+        <strong id="settings-reset-countdown">--h --m --s</strong>
+        <small id="settings-next-reset">Loading IST reset…</small>
+      </section>
+      <label>Daily reset time (IST)
+        <input id="settings-reset-time" type="time" step="60" required>
+      </label>
+      <p class="settings-note">A change applies going forward and re-buckets only dopes completed during the previous 10 minutes. Older progress history keeps the reset rule it already had.</p>
+      <div class="modal-actions">
+        <button id="settings-save" value="default"><i aria-hidden="true" class="ph ph-floppy-disk"></i>Save settings</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="profile-dialog">
+    <form method="dialog" class="modal small profile-modal">
+      <button class="icon-close" value="cancel" aria-label="Close"><i aria-hidden="true" class="ph ph-x"></i></button>
+      <h2>Profile</h2>
+      <p><span id="account-handle"></span> · <a href="/api/auth/login">Switch account</a></p>
+      <label>Display name<input id="profile-display-name" autocomplete="name" placeholder="Display name"></label>
+      <label>Graph color
+        <div class="color-field">
+          <input id="profile-color" type="color" aria-label="Graph color">
+          <input id="profile-color-hex" autocomplete="off" spellcheck="false" placeholder="#1a1a1a">
+        </div>
+      </label>
+      <div class="color-presets" aria-label="Preset colors">
+        <button type="button" data-profile-color="#1a1a1a" style="--swatch:#1a1a1a"></button>
+        <button type="button" data-profile-color="#ffbb00" style="--swatch:#ffbb00"></button>
+        <button type="button" data-profile-color="#5a9a6b" style="--swatch:#5a9a6b"></button>
+        <button type="button" data-profile-color="#2e6f8e" style="--swatch:#2e6f8e"></button>
+        <button type="button" data-profile-color="#7a4d8e" style="--swatch:#7a4d8e"></button>
+        <button type="button" data-profile-color="#9a4d42" style="--swatch:#9a4d42"></button>
+        <button type="button" data-profile-color="#c56f2d" style="--swatch:#c56f2d"></button>
+        <button type="button" data-profile-color="#2f8f83" style="--swatch:#2f8f83"></button>
+        <button type="button" data-profile-color="#4f68b1" style="--swatch:#4f68b1"></button>
+        <button type="button" data-profile-color="#b23a70" style="--swatch:#b23a70"></button>
+      </div>
+      <div class="color-preview">
+        <span id="profile-color-preview"></span>
+        <span>Your progress chart block color</span>
+      </div>
+      <section class="api-key-panel">
+        <h3>API keys</h3>
+        <div id="api-key-created" class="api-key-created" hidden>
+          <span>Copy this key now. It will not be shown again.</span>
+          <code id="api-key-value"></code>
+          <button id="api-key-copy" class="secondary" type="button"><i aria-hidden="true" class="ph ph-copy"></i>Copy key</button>
+        </div>
+        <div class="api-key-create">
+          <input id="api-key-name" autocomplete="off" placeholder="Key name">
+          <button id="api-key-create" class="secondary" type="button"><i aria-hidden="true" class="ph ph-key"></i>Generate</button>
+        </div>
+        <div id="api-key-list" class="api-key-list"></div>
+      </section>
+      <div class="modal-actions">
+        <button id="profile-save" value="default">Save profile</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>
